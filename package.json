@@ -1,0 +1,20 @@
+{
+  "name": "simple-invoicing-tool",
+  "version": "1.0.0",
+  "description": "Simple billing / invoicing tool: customers, invoices, recurring billing, Gmail send, PDF download.",
+  "main": "server/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node server/index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "exceljs": "^4.4.0",
+    "express": "^4.19.2",
+    "googleapis": "^140.0.1",
+    "nodemailer": "^6.9.14",
+    "pdfkit": "^0.15.2",
+    "svg-to-pdfkit": "^0.1.8"
+  }
+}

@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Invoicing Tool</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <!-- React 18 + Babel (in-browser JSX, no build step) -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <!--
+    Deterministic JSX loader: fetch each file, transpile with Babel, then inject as a
+    classic <script> in order. This guarantees execution order (template before app),
+    which the in-browser Babel auto-runner does not reliably do for multiple src files.
+  -->
+  <script>
+    (async function bootstrap() {
+      const files = ['/invoice-template.jsx', '/app.jsx'];
+      for (const f of files) {
+        try {
+          const src = await (await fetch(f)).text();
+          const { code } = Babel.transform(src, { presets: ['react'], filename: f });
+          const s = document.createElement('script');
+          // Wrap in an IIFE so each file gets its own scope — classic scripts otherwise
+          // share one global lexical scope and collide on shared top-level `const`s.
+          s.textContent = '(function(){\n' + code + '\n})();';
+          document.body.appendChild(s); // executes synchronously as a classic script
+        } catch (e) {
+          document.getElementById('root').innerHTML =
+            '<pre style="padding:24px;color:#b00">Failed to load ' + f + '\n' + (e && e.message) + '</pre>';
+          console.error('Bootstrap error in', f, e);
+          return;
+        }
+      }
+    })();
+  </script>
+</body>
+</html>
