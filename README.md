@@ -55,9 +55,24 @@ Everything except **Send via Gmail** works without any Google setup. Use **Downl
 
 While the OAuth consent screen is in "Testing", add your Google address as a **Test user**.
 
-## Data
+## Data & privacy
 
-All data lives in `data/db.json` (git-ignored), with a PDF copy of every invoice under `data/invoices/<org-id>/`. Delete `data/` to reset and start again from the landing page → onboarding.
+All data lives in `data/db.json` (git-ignored), with a PDF copy of every invoice under `data/invoices/<org-id>/`. The `data/` directory is created automatically on first launch — a fresh clone starts with an empty database and walks you through onboarding. Nothing you enter is committed to git or sent anywhere; delete `data/` to reset and start again.
+
+## Project structure
+
+```
+server/
+  index.js   — Express routes + the storage⇄API mapping layer
+  store.js   — JSON-file persistence, schema versioning & migrations
+  pdf.js     — server-side vector PDF rendering (pdfkit)
+  invoice.js — totals, rounding, amount-in-words helpers
+  google.js  — Gmail OAuth2 + send (nodemailer)
+  export.js  — Excel (.xlsx) export
+public/
+  index.html, app.jsx, invoice-template.jsx, styles.css  — no-build React SPA
+SCHEMA.md    — the normalized data model in detail
+```
 
 ## API (for reference)
 
@@ -65,3 +80,7 @@ All data lives in `data/db.json` (git-ignored), with a PDF copy of every invoice
 `/api/invoices` (+ `/:id/pay`, `/:id/unpay`, `/:id/send`, `/:id/pdf`, `/:id/payments`), `/api/recurring` (+ `/:id/run`),
 `/api/export` (xlsx; `?datasets=&from=&to=&status=&customerId=`), `/api/google/status`, `/auth/google`.
 All data routes operate on the currently-active org.
+
+## License
+
+Released under the [MIT License](LICENSE).
