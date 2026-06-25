@@ -1,65 +1,89 @@
-# Simple Invoicing Tool
+# Simply Invoicing
 
-A small, clean billing tool to create customers, raise invoices, email them from your Gmail (PDF attached), download invoice PDFs, mark invoices paid (recording the payment mode), and run **monthly recurring invoices**. Invoice layout is matched to the Zoho-style "Tax Invoice" template.
+A **self-hosted** invoicing tool you fully own — create customers, raise clean PDF invoices, email them from your own Gmail, mark them paid, and run monthly recurring billing. No subscription, no feature paywalls, no data leaving your machine.
 
-## Features
+---
 
-- **Landing → onboarding** — first run shows a minimal landing page; "Go to app" walks a new user through creating their first organization (no login required).
-- **Organizations** — keep separate businesses in one tool. Switch between them (or exit back to the landing page) from the switcher at the top of the sidebar. Customers, items, invoices, recurring schedules, numbering, logo and settings are all scoped per org.
-- **Customers** — billing & ship-to address, recipient email (+ cc), GSTIN/Tax ID.
-- **Invoices** — line items, auto totals, tax, amount-in-words, auto due date from terms.
-- **Pixel-matched template** — dark logo block, dark table header, balance-due bar, notes/bank block.
-- **Send via Gmail** — Google OAuth connect; emails the invoice with the PDF attached, from your address.
-- **Download PDF** — client-side, send it yourself however you like.
-- **Mark as paid** — records payment mode, date, reference, amount; shows a PAID stamp.
-- **Recurring** — monthly schedules that auto-generate the next invoice on a chosen day. A built-in hourly scheduler materializes due invoices (and catches up if the server was off).
-- **Excel export** — download invoices, customers and items as a real `.xlsx` workbook (one sheet each, with auto-filter and a totals row). Invoices can be filtered by status, customer, and a **smart date range** — This month, This/Last quarter, This/Last financial year (Apr–Mar), Year to date, Last 30/90 days, Last 12 months, or a custom from/to.
-- **Settings** — your business/sender details, currency, invoice numbering, default terms & bank notes.
+## Why this exists
 
-## Stack
+A relative of mine kept being asked to pay more every time they needed one specific feature — the classic SaaS playbook where the thing you actually need is always one tier up.
 
-- **Backend:** Node + Express, JSON-file storage in `data/db.json` (atomic writes, no database to install). The data is modeled as normalized top-level collections with stable ids/foreign keys, a uniform record envelope, soft deletes, a payments ledger, and a versioned migration on load — see **[SCHEMA.md](SCHEMA.md)**. Older databases upgrade automatically on first launch.
-- **PDF:** rendered server-side as **true vector text** with `pdfkit` (+ `svg-to-pdfkit` for SVG logos) — crisp at any zoom, tiny files. A copy of every invoice is saved to `data/invoices/<number>.pdf`.
-- **Email:** Gmail via `nodemailer` OAuth2 + `googleapis` for the consent flow; emails attach the stored PDF.
-- **Frontend:** React 18 + Babel via CDN (no build step). The on-screen invoice is a live preview; downloads/emails use the server-rendered PDF.
+That model is starting to look outdated. AI has made software cheap to build and easy to tailor to a single person's needs, and walling basic features behind a paywall increasingly feels like a relic of the past. So instead of paying a recurring fee for someone else's roadmap, I built exactly what they needed: a small invoicing tool that does the job, runs on their own machine, and is theirs to keep and change.
 
-## Items catalog
+That's the whole idea — **own your tools, own your data.**
 
-Save the things you sell under **Items** (default rate + tax). When adding invoice line items, pick a saved item from the dropdown (auto-fills price & tax) or type a new name and press **＋** to save it on the fly.
+---
 
-## Run
+## What it does
+
+- 🧾 **Invoices** — line items, automatic totals & tax, amount-in-words, and a due date worked out from your terms.
+- 👥 **Customers & items** — save who you bill (address, email, tax ID) and what you sell (default rate + tax) for one-click reuse.
+- 📄 **Clean PDFs** — every invoice renders as a crisp, professional PDF you can download or attach.
+- ✉️ **Email from your Gmail** *(optional)* — connect your Google account and send invoices straight from your own address, PDF attached.
+- ✅ **Mark as paid** — record the payment mode, date and reference; the invoice gets a **PAID** stamp. Partial payments supported.
+- 🔁 **Recurring billing** — monthly schedules auto-generate each invoice on the day you choose (and catch up if the server was off).
+- 🏢 **Multiple businesses** — keep separate organizations in one app, each with its own customers, numbering, logo and settings.
+- 📊 **Excel export** — export invoices, customers and items to `.xlsx`, with smart date-range filters (this month, last quarter, financial year, and more).
+- 🔒 **Your data stays yours** — everything lives in a single local file. No cloud, no account, no tracking.
+
+---
+
+## Quick start
+
+You'll need [Node.js](https://nodejs.org) (v18 or newer).
 
 ```bash
-cd "Invoicing tool"
+git clone https://github.com/utkarsh301093/Simply-Invoicing.git
+cd Simply-Invoicing
 npm install
-cp .env.example .env      # then edit if you want Gmail sending
-npm start                 # http://localhost:4000
+npm start
 ```
 
-Everything except **Send via Gmail** works without any Google setup. Use **Download PDF** if you prefer to send invoices yourself.
+Now open **http://localhost:4000** and follow the onboarding to set up your business.
 
-## Enabling "Send via Gmail" (optional)
+That's it — no database to install, no sign-up. Your local data store is created automatically on first launch, and everything you enter stays on your machine.
 
-1. Go to the [Google Cloud Console](https://console.cloud.google.com/) → create/select a project.
-2. **APIs & Services → Library →** enable **Gmail API**.
+> 💡 Want to email invoices from Gmail? That part is optional — see [Sending via Gmail](#sending-via-gmail-optional) below. Without it, everything still works; just use **Download PDF** and send invoices however you like.
+
+---
+
+## Sending via Gmail (optional)
+
+Turn this on if you want to email invoices directly from your own Gmail address.
+
+1. In the [Google Cloud Console](https://console.cloud.google.com/), create or select a project.
+2. **APIs & Services → Library →** enable the **Gmail API**.
 3. **APIs & Services → Credentials →** create an **OAuth client ID** (type: *Web application*).
-4. Add an authorized redirect URI: `http://localhost:4000/auth/google/callback`
-   (must equal `<APP_BASE_URL>/auth/google/callback`).
-5. Put the client ID/secret in `.env`:
+4. Add this authorized redirect URI: `http://localhost:4000/auth/google/callback`
+5. Copy `.env.example` to `.env` and fill in your credentials:
+   ```bash
+   cp .env.example .env
+   ```
    ```
    GOOGLE_CLIENT_ID=...
    GOOGLE_CLIENT_SECRET=...
    APP_BASE_URL=http://localhost:4000
    ```
-6. Restart the server, open **Settings → Connect Google account**, approve the `gmail.send` scope.
+6. Restart the server, then open **Settings → Connect Google account** and approve the `gmail.send` scope.
 
-While the OAuth consent screen is in "Testing", add your Google address as a **Test user**.
+While your OAuth consent screen is still in "Testing", remember to add your Google address as a **Test user**.
 
-## Data & privacy
+---
 
-All data lives in `data/db.json` (git-ignored), with a PDF copy of every invoice under `data/invoices/<org-id>/`. The `data/` directory is created automatically on first launch — a fresh clone starts with an empty database and walks you through onboarding. Nothing you enter is committed to git or sent anywhere; delete `data/` to reset and start again.
+## Your data & privacy
 
-## Project structure
+Everything is stored in a single git-ignored file, `data/db.json`, with a PDF copy of each invoice under `data/invoices/`. The `data/` folder is created automatically the first time you run the app, so a fresh clone always starts empty and walks you through onboarding. Nothing is committed to git or sent anywhere. To wipe everything and start over, just delete the `data/` folder.
+
+---
+
+## How it works
+
+A single Node + Express process serves a no-build React frontend — no bundler, no database engine, nothing to provision.
+
+- **Backend:** Node + Express with JSON-file storage (atomic writes). The data is modeled as normalized collections with stable ids, soft deletes, a payments ledger, and versioned migrations — details in **[SCHEMA.md](SCHEMA.md)**.
+- **PDFs:** rendered server-side as true vector text with `pdfkit` — crisp at any zoom and tiny in size.
+- **Email:** Gmail via `nodemailer` + `googleapis` OAuth2.
+- **Frontend:** React 18 + Babel loaded from a CDN (no build step).
 
 ```
 server/
@@ -71,16 +95,10 @@ server/
   export.js  — Excel (.xlsx) export
 public/
   index.html, app.jsx, invoice-template.jsx, styles.css  — no-build React SPA
-SCHEMA.md    — the normalized data model in detail
 ```
 
-## API (for reference)
-
-`/api/orgs` (+ `POST`, `/:id/activate`, `DELETE`), `/api/settings`, `/api/customers`, `/api/products`,
-`/api/invoices` (+ `/:id/pay`, `/:id/unpay`, `/:id/send`, `/:id/pdf`, `/:id/payments`), `/api/recurring` (+ `/:id/run`),
-`/api/export` (xlsx; `?datasets=&from=&to=&status=&customerId=`), `/api/google/status`, `/auth/google`.
-All data routes operate on the currently-active org.
+---
 
 ## License
 
-Released under the [MIT License](LICENSE).
+Released under the [MIT License](LICENSE). Use it, change it, host it — it's yours.
