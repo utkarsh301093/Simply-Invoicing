@@ -54,6 +54,7 @@ document collections, so new features slot in without reshaping what already exi
 | `invoices`           | The issued documents                | `orgId`, `customerId`, `recurringScheduleId?` |
 | `payments`           | Money received — the ledger         | `orgId`, `invoiceId`          |
 | `recurringSchedules` | Subscription templates that mint invoices | `orgId`, `customerId`   |
+| `reminders`          | Scheduled payment-reminder emails   | `orgId`, `invoiceId`          |
 | `activity`           | Append-only audit / event log       | `orgId`, `refType`/`refId`    |
 | `integrations`       | Global third-party connections (Gmail) | —                          |
 | `meta`               | App state: `currentOrgId`, timestamps, `schemaVersion` | —          |
@@ -118,6 +119,14 @@ document collections, so new features slot in without reshaping what already exi
   "autoSend": false,
   "createdAt", "updatedAt", "archivedAt": null, "metadata": {} }
 
+// reminders[]  (payment-reminder emails, sent by the hourly scheduler via Gmail)
+{ "id": "rem_…", "orgId", "invoiceId",
+  "offsetDays": 0,                      // vs. dueDate: negative = before, 0 = on, positive = after
+  "dueOn": "2026-07-28",                // send date, fixed when the reminder is created
+  "status": "pending|sent|cancelled",   // cancelled on payment/void or by the user
+  "sentAt": null, "sentTo": null, "error": null,
+  "createdAt", "updatedAt", "archivedAt": null, "metadata": {} }
+
 // activity[]
 { "id": "act_…", "orgId", "type": "invoice.sent", "refType": "invoice", "refId": "inv_…",
   "message", "at", "metadata": {} }
@@ -137,7 +146,7 @@ feature without breaking clients.
 - **Credit notes, estimates/quotes** → new top-level collections sharing the same envelope.
 - **Multiple contacts / addresses per customer** → `customers[].contacts`, more address objects.
 - **Tax engine** → `taxRates` + `items[].taxRateId` + per-line `taxRateId`.
-- **Attachments, comments, reminders** → new collections referencing `invoiceId`.
+- **Attachments, comments** → new collections referencing `invoiceId` (as `reminders` does).
 - **Audit trail / “who did what”** → already streaming into `activity`.
 - **Per-org Gmail, users/teams, roles** → `integrations` per org, a `users` collection with `orgId`.
 - **Custom fields anywhere** → the `metadata` object on every record.

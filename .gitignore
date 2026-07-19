@@ -1,5 +1,9 @@
 node_modules/
 data/
+# Match .env and every variant (.env.local, .env.bak-*, .env.production …) so a
+# stray copy can never be committed. .env.example is force-included below.
 .env
+.env.*
+!.env.example
 *.log
 .DS_Store

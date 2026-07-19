@@ -1,0 +1,1479 @@
+[
+  {
+    "step": "orgs: empty on first boot",
+    "request": {
+      "method": "GET",
+      "path": "/api/orgs"
+    },
+    "status": 200,
+    "response": {
+      "currentOrgId": null,
+      "orgs": []
+    }
+  },
+  {
+    "step": "orgs: create",
+    "request": {
+      "method": "POST",
+      "path": "/api/orgs"
+    },
+    "status": 200,
+    "response": {
+      "createdAt": "<timestamp>",
+      "customerCount": 0,
+      "id": "<id#1>",
+      "invoiceCount": 0,
+      "name": "Acme Consulting"
+    }
+  },
+  {
+    "step": "settings: defaults after org create",
+    "request": {
+      "method": "GET",
+      "path": "/api/settings"
+    },
+    "status": 200,
+    "response": {
+      "addressLines": [
+        "12 Example Road",
+        "Bengaluru 560001"
+      ],
+      "businessName": "Acme Consulting",
+      "currency": "₹",
+      "defaultNotes": "",
+      "defaultTaxLabel": "IGST",
+      "defaultTerms": "Net 15",
+      "gstin": "29ABCDE1234F1Z5",
+      "invoicePrefix": "INV-",
+      "logo": null,
+      "logoBg": "light",
+      "nextNumber": 1,
+      "reminderOffsets": [
+        0
+      ]
+    }
+  },
+  {
+    "step": "settings: update prefix and reminder offsets",
+    "request": {
+      "method": "PUT",
+      "path": "/api/settings"
+    },
+    "status": 200,
+    "response": {
+      "addressLines": [
+        "12 Example Road",
+        "Bengaluru 560001"
+      ],
+      "businessName": "Acme Consulting",
+      "currency": "₹",
+      "defaultNotes": "",
+      "defaultTaxLabel": "IGST",
+      "defaultTerms": "Net 15",
+      "gstin": "29ABCDE1234F1Z5",
+      "invoicePrefix": "ACME-",
+      "logo": null,
+      "logoBg": "light",
+      "nextNumber": 1,
+      "reminderOffsets": [
+        -3,
+        0,
+        7
+      ]
+    }
+  },
+  {
+    "step": "settings: offsets are sanitized",
+    "request": {
+      "method": "PUT",
+      "path": "/api/settings"
+    },
+    "status": 200,
+    "response": {
+      "addressLines": [
+        "12 Example Road",
+        "Bengaluru 560001"
+      ],
+      "businessName": "Acme Consulting",
+      "currency": "₹",
+      "defaultNotes": "",
+      "defaultTaxLabel": "IGST",
+      "defaultTerms": "Net 15",
+      "gstin": "29ABCDE1234F1Z5",
+      "invoicePrefix": "ACME-",
+      "logo": null,
+      "logoBg": "light",
+      "nextNumber": 1,
+      "reminderOffsets": [
+        -3,
+        0,
+        2,
+        7
+      ]
+    }
+  },
+  {
+    "step": "customers: create",
+    "request": {
+      "method": "POST",
+      "path": "/api/customers"
+    },
+    "status": 200,
+    "response": {
+      "billingAddressLines": [
+        "9 Industrial Way",
+        "Pune 411001"
+      ],
+      "ccEmail": "finance@globex.example",
+      "createdAt": "<timestamp>",
+      "email": "ap@globex.example",
+      "gstin": "27FGHIJ5678K1Z2",
+      "id": "<id#2>",
+      "name": "Globex Ltd",
+      "shipToAddressLines": [
+        "Warehouse 4",
+        "Pune 411002"
+      ]
+    }
+  },
+  {
+    "step": "customers: update",
+    "request": {
+      "method": "PUT",
+      "path": "/api/customers/<id#2>"
+    },
+    "status": 200,
+    "response": {
+      "billingAddressLines": [
+        "9 Industrial Way",
+        "Pune 411001"
+      ],
+      "ccEmail": "finance@globex.example",
+      "createdAt": "<timestamp>",
+      "email": "ap@globex.example",
+      "gstin": "27FGHIJ5678K1Z2",
+      "id": "<id#2>",
+      "name": "Globex Limited",
+      "shipToAddressLines": [
+        "Warehouse 4",
+        "Pune 411002"
+      ]
+    }
+  },
+  {
+    "step": "customers: list",
+    "request": {
+      "method": "GET",
+      "path": "/api/customers"
+    },
+    "status": 200,
+    "response": [
+      {
+        "billingAddressLines": [
+          "9 Industrial Way",
+          "Pune 411001"
+        ],
+        "ccEmail": "finance@globex.example",
+        "createdAt": "<timestamp>",
+        "email": "ap@globex.example",
+        "gstin": "27FGHIJ5678K1Z2",
+        "id": "<id#2>",
+        "name": "Globex Limited",
+        "shipToAddressLines": [
+          "Warehouse 4",
+          "Pune 411002"
+        ]
+      }
+    ]
+  },
+  {
+    "step": "products: create",
+    "request": {
+      "method": "POST",
+      "path": "/api/products"
+    },
+    "status": 200,
+    "response": {
+      "createdAt": "<timestamp>",
+      "id": "<id#3>",
+      "name": "Consulting hour",
+      "rate": 2500,
+      "taxPct": 18
+    }
+  },
+  {
+    "step": "products: duplicate name updates in place",
+    "request": {
+      "method": "POST",
+      "path": "/api/products"
+    },
+    "status": 200,
+    "response": {
+      "createdAt": "<timestamp>",
+      "id": "<id#3>",
+      "name": "Consulting hour",
+      "rate": 3000,
+      "taxPct": 18
+    }
+  },
+  {
+    "step": "products: create second",
+    "request": {
+      "method": "POST",
+      "path": "/api/products"
+    },
+    "status": 200,
+    "response": {
+      "createdAt": "<timestamp>",
+      "id": "<id#4>",
+      "name": "Setup fee",
+      "rate": 10000,
+      "taxPct": 18
+    }
+  },
+  {
+    "step": "products: list",
+    "request": {
+      "method": "GET",
+      "path": "/api/products"
+    },
+    "status": 200,
+    "response": [
+      {
+        "createdAt": "<timestamp>",
+        "id": "<id#3>",
+        "name": "Consulting hour",
+        "rate": 3000,
+        "taxPct": 18
+      },
+      {
+        "createdAt": "<timestamp>",
+        "id": "<id#4>",
+        "name": "Setup fee",
+        "rate": 10000,
+        "taxPct": 18
+      }
+    ]
+  },
+  {
+    "step": "products: name is required",
+    "request": {
+      "method": "POST",
+      "path": "/api/products"
+    },
+    "status": 400,
+    "response": {
+      "error": "Item name required"
+    }
+  },
+  {
+    "step": "invoices: create",
+    "request": {
+      "method": "POST",
+      "path": "/api/invoices"
+    },
+    "status": 200,
+    "response": {
+      "amountInWords": "United States Dollar Forty-One Thousand Three Hundred",
+      "amountPaid": 0,
+      "balanceDue": 41300,
+      "billTo": {
+        "addressLines": [
+          "9 Industrial Way",
+          "Pune 411001"
+        ],
+        "gstin": "27FGHIJ5678K1Z2",
+        "name": "Globex Limited"
+      },
+      "business": {
+        "addressLines": [
+          "12 Example Road",
+          "Bengaluru 560001"
+        ],
+        "gstin": "29ABCDE1234F1Z5",
+        "logo": null,
+        "logoBg": "light",
+        "name": "Acme Consulting"
+      },
+      "createdAt": "<timestamp>",
+      "currency": "₹",
+      "customerId": "<id#2>",
+      "dueDate": "2030-01-16",
+      "id": "<id#5>",
+      "invoiceDate": "2030-01-01",
+      "items": [
+        {
+          "description": "Consulting hour",
+          "qty": 10,
+          "rate": 2500,
+          "taxPct": 18
+        },
+        {
+          "description": "Setup fee",
+          "qty": 1,
+          "rate": 10000,
+          "taxPct": 18
+        }
+      ],
+      "notes": "Thanks for your business.",
+      "number": "ACME-1",
+      "payment": null,
+      "pdfFile": "ACME-1.pdf",
+      "pdfUpdatedAt": "<timestamp>",
+      "recipientEmail": "ap@globex.example",
+      "recurringId": null,
+      "sentAt": null,
+      "sentTo": null,
+      "shipTo": {
+        "addressLines": [
+          "9 Industrial Way",
+          "Pune 411001"
+        ]
+      },
+      "status": "draft",
+      "subTotal": 35000,
+      "taxLabel": "IGST",
+      "taxTotal": 6300,
+      "terms": "Net 15",
+      "total": 41300,
+      "updatedAt": "<timestamp>"
+    }
+  },
+  {
+    "step": "invoices: fetch one",
+    "request": {
+      "method": "GET",
+      "path": "/api/invoices/<id#5>"
+    },
+    "status": 200,
+    "response": {
+      "amountInWords": "United States Dollar Forty-One Thousand Three Hundred",
+      "amountPaid": 0,
+      "balanceDue": 41300,
+      "billTo": {
+        "addressLines": [
+          "9 Industrial Way",
+          "Pune 411001"
+        ],
+        "gstin": "27FGHIJ5678K1Z2",
+        "name": "Globex Limited"
+      },
+      "business": {
+        "addressLines": [
+          "12 Example Road",
+          "Bengaluru 560001"
+        ],
+        "gstin": "29ABCDE1234F1Z5",
+        "logo": null,
+        "logoBg": "light",
+        "name": "Acme Consulting"
+      },
+      "createdAt": "<timestamp>",
+      "currency": "₹",
+      "customerId": "<id#2>",
+      "dueDate": "2030-01-16",
+      "id": "<id#5>",
+      "invoiceDate": "2030-01-01",
+      "items": [
+        {
+          "description": "Consulting hour",
+          "qty": 10,
+          "rate": 2500,
+          "taxPct": 18
+        },
+        {
+          "description": "Setup fee",
+          "qty": 1,
+          "rate": 10000,
+          "taxPct": 18
+        }
+      ],
+      "notes": "Thanks for your business.",
+      "number": "ACME-1",
+      "payment": null,
+      "pdfFile": "ACME-1.pdf",
+      "pdfUpdatedAt": "<timestamp>",
+      "recipientEmail": "ap@globex.example",
+      "recurringId": null,
+      "sentAt": null,
+      "sentTo": null,
+      "shipTo": {
+        "addressLines": [
+          "9 Industrial Way",
+          "Pune 411001"
+        ]
+      },
+      "status": "draft",
+      "subTotal": 35000,
+      "taxLabel": "IGST",
+      "taxTotal": 6300,
+      "terms": "Net 15",
+      "total": 41300,
+      "updatedAt": "<timestamp>"
+    }
+  },
+  {
+    "step": "invoices: edit line items recomputes totals",
+    "request": {
+      "method": "PUT",
+      "path": "/api/invoices/<id#5>"
+    },
+    "status": 200,
+    "response": {
+      "amountInWords": "United States Dollar Thirty-Five Thousand Four Hundred",
+      "amountPaid": 0,
+      "balanceDue": 35400,
+      "billTo": {
+        "addressLines": [
+          "9 Industrial Way",
+          "Pune 411001"
+        ],
+        "gstin": "27FGHIJ5678K1Z2",
+        "name": "Globex Limited"
+      },
+      "business": {
+        "addressLines": [
+          "12 Example Road",
+          "Bengaluru 560001"
+        ],
+        "gstin": "29ABCDE1234F1Z5",
+        "logo": null,
+        "logoBg": "light",
+        "name": "Acme Consulting"
+      },
+      "createdAt": "<timestamp>",
+      "currency": "₹",
+      "customerId": "<id#2>",
+      "dueDate": "2030-01-16",
+      "id": "<id#5>",
+      "invoiceDate": "2030-01-01",
+      "items": [
+        {
+          "description": "Consulting hour",
+          "qty": 12,
+          "rate": 2500,
+          "taxPct": 18
+        }
+      ],
+      "notes": "Thanks for your business.",
+      "number": "ACME-1",
+      "payment": null,
+      "pdfFile": "ACME-1.pdf",
+      "pdfUpdatedAt": "<timestamp>",
+      "recipientEmail": "ap@globex.example",
+      "recurringId": null,
+      "sentAt": null,
+      "sentTo": null,
+      "shipTo": {
+        "addressLines": [
+          "9 Industrial Way",
+          "Pune 411001"
+        ]
+      },
+      "status": "draft",
+      "subTotal": 30000,
+      "taxLabel": "IGST",
+      "taxTotal": 5400,
+      "terms": "Net 15",
+      "total": 35400,
+      "updatedAt": "<timestamp>"
+    }
+  },
+  {
+    "step": "invoices: pdf renders",
+    "request": {
+      "method": "GET",
+      "path": "/api/invoices/<id#5>/pdf"
+    },
+    "status": 200,
+    "response": {
+      "pdfBytes": true,
+      "startsWithPdfMagic": true
+    }
+  },
+  {
+    "step": "invoices: email defaults",
+    "request": {
+      "method": "GET",
+      "path": "/api/invoices/<id#5>/email-defaults"
+    },
+    "status": 200,
+    "response": {
+      "message": "Dear Globex Limited team,\n\nPlease find the attached invoice.\n\nInvoice amount: ₹35,400.00\nInvoice number: ACME-1\nInvoice date: 1 January, 2030\nDue date: 16 January, 2030\n\nRegards,\nAcme Consulting",
+      "reminderOffsets": [
+        -3,
+        0,
+        2,
+        7
+      ],
+      "subject": "Invoice ACME-1 from Acme Consulting"
+    }
+  },
+  {
+    "step": "invoices: unknown id is 404",
+    "request": {
+      "method": "GET",
+      "path": "/api/invoices/<id#6>"
+    },
+    "status": 404,
+    "response": {
+      "error": "Invoice not found"
+    }
+  },
+  {
+    "step": "invoices: create with unknown customer fails",
+    "request": {
+      "method": "POST",
+      "path": "/api/invoices"
+    },
+    "status": 400,
+    "response": {
+      "error": "Customer not found"
+    }
+  },
+  {
+    "step": "reminders: schedule one before due date",
+    "request": {
+      "method": "POST",
+      "path": "/api/invoices/<id#5>/reminders"
+    },
+    "status": 200,
+    "response": [
+      {
+        "createdAt": "<timestamp>",
+        "dueOn": "2030-01-13",
+        "error": null,
+        "id": "<id#7>",
+        "invoiceId": "<id#5>",
+        "offsetDays": -3,
+        "sentAt": null,
+        "sentTo": null,
+        "status": "pending"
+      }
+    ]
+  },
+  {
+    "step": "reminders: same offset twice is rejected",
+    "request": {
+      "method": "POST",
+      "path": "/api/invoices/<id#5>/reminders"
+    },
+    "status": 400,
+    "response": {
+      "error": "Reminder date is in the past or already scheduled."
+    }
+  },
+  {
+    "step": "reminders: past date is rejected",
+    "request": {
+      "method": "POST",
+      "path": "/api/invoices/<id#5>/reminders"
+    },
+    "status": 400,
+    "response": {
+      "error": "Reminder date is in the past or already scheduled."
+    }
+  },
+  {
+    "step": "reminders: list",
+    "request": {
+      "method": "GET",
+      "path": "/api/invoices/<id#5>/reminders"
+    },
+    "status": 200,
+    "response": [
+      {
+        "createdAt": "<timestamp>",
+        "dueOn": "2030-01-13",
+        "error": null,
+        "id": "<id#7>",
+        "invoiceId": "<id#5>",
+        "offsetDays": -3,
+        "sentAt": null,
+        "sentTo": null,
+        "status": "pending"
+      }
+    ]
+  },
+  {
+    "step": "reminders: cancel one",
+    "request": {
+      "method": "DELETE",
+      "path": "/api/reminders/<id#7>"
+    },
+    "status": 200,
+    "response": [
+      {
+        "createdAt": "<timestamp>",
+        "dueOn": "2030-01-13",
+        "error": null,
+        "id": "<id#7>",
+        "invoiceId": "<id#5>",
+        "offsetDays": -3,
+        "sentAt": null,
+        "sentTo": null,
+        "status": "cancelled"
+      }
+    ]
+  },
+  {
+    "step": "reminders: schedule another",
+    "request": {
+      "method": "POST",
+      "path": "/api/invoices/<id#5>/reminders"
+    },
+    "status": 200,
+    "response": [
+      {
+        "createdAt": "<timestamp>",
+        "dueOn": "2030-01-13",
+        "error": null,
+        "id": "<id#7>",
+        "invoiceId": "<id#5>",
+        "offsetDays": -3,
+        "sentAt": null,
+        "sentTo": null,
+        "status": "cancelled"
+      },
+      {
+        "createdAt": "<timestamp>",
+        "dueOn": "2030-01-23",
+        "error": null,
+        "id": "<id#8>",
+        "invoiceId": "<id#5>",
+        "offsetDays": 7,
+        "sentAt": null,
+        "sentTo": null,
+        "status": "pending"
+      }
+    ]
+  },
+  {
+    "step": "payments: partial payment leaves balance",
+    "request": {
+      "method": "POST",
+      "path": "/api/invoices/<id#5>/pay"
+    },
+    "status": 200,
+    "response": {
+      "amountInWords": "United States Dollar Thirty-Five Thousand Four Hundred",
+      "amountPaid": 5000,
+      "balanceDue": 30400,
+      "billTo": {
+        "addressLines": [
+          "9 Industrial Way",
+          "Pune 411001"
+        ],
+        "gstin": "27FGHIJ5678K1Z2",
+        "name": "Globex Limited"
+      },
+      "business": {
+        "addressLines": [
+          "12 Example Road",
+          "Bengaluru 560001"
+        ],
+        "gstin": "29ABCDE1234F1Z5",
+        "logo": null,
+        "logoBg": "light",
+        "name": "Acme Consulting"
+      },
+      "createdAt": "<timestamp>",
+      "currency": "₹",
+      "customerId": "<id#2>",
+      "dueDate": "2030-01-16",
+      "id": "<id#5>",
+      "invoiceDate": "2030-01-01",
+      "items": [
+        {
+          "description": "Consulting hour",
+          "qty": 12,
+          "rate": 2500,
+          "taxPct": 18
+        }
+      ],
+      "notes": "Thanks for your business.",
+      "number": "ACME-1",
+      "payment": {
+        "amount": 5000,
+        "date": "2030-01-10",
+        "mode": "Bank Transfer",
+        "reference": "UTR-001"
+      },
+      "pdfFile": "ACME-1.pdf",
+      "pdfUpdatedAt": "<timestamp>",
+      "recipientEmail": "ap@globex.example",
+      "recurringId": null,
+      "sentAt": null,
+      "sentTo": null,
+      "shipTo": {
+        "addressLines": [
+          "9 Industrial Way",
+          "Pune 411001"
+        ]
+      },
+      "status": "draft",
+      "subTotal": 30000,
+      "taxLabel": "IGST",
+      "taxTotal": 5400,
+      "terms": "Net 15",
+      "total": 35400,
+      "updatedAt": "<timestamp>"
+    }
+  },
+  {
+    "step": "payments: ledger after partial",
+    "request": {
+      "method": "GET",
+      "path": "/api/invoices/<id#5>/payments"
+    },
+    "status": 200,
+    "response": [
+      {
+        "amount": 5000,
+        "archivedAt": null,
+        "createdAt": "<timestamp>",
+        "currency": "₹",
+        "date": "2030-01-10",
+        "id": "<id#9>",
+        "invoiceId": "<id#5>",
+        "metadata": {},
+        "mode": "Bank Transfer",
+        "note": "",
+        "orgId": "<id#1>",
+        "reference": "UTR-001",
+        "updatedAt": "<timestamp>"
+      }
+    ]
+  },
+  {
+    "step": "payments: settling the balance marks it paid",
+    "request": {
+      "method": "POST",
+      "path": "/api/invoices/<id#5>/pay"
+    },
+    "status": 200,
+    "response": {
+      "amountInWords": "United States Dollar Thirty-Five Thousand Four Hundred",
+      "amountPaid": 40400,
+      "balanceDue": 0,
+      "billTo": {
+        "addressLines": [
+          "9 Industrial Way",
+          "Pune 411001"
+        ],
+        "gstin": "27FGHIJ5678K1Z2",
+        "name": "Globex Limited"
+      },
+      "business": {
+        "addressLines": [
+          "12 Example Road",
+          "Bengaluru 560001"
+        ],
+        "gstin": "29ABCDE1234F1Z5",
+        "logo": null,
+        "logoBg": "light",
+        "name": "Acme Consulting"
+      },
+      "createdAt": "<timestamp>",
+      "currency": "₹",
+      "customerId": "<id#2>",
+      "dueDate": "2030-01-16",
+      "id": "<id#5>",
+      "invoiceDate": "2030-01-01",
+      "items": [
+        {
+          "description": "Consulting hour",
+          "qty": 12,
+          "rate": 2500,
+          "taxPct": 18
+        }
+      ],
+      "notes": "Thanks for your business.",
+      "number": "ACME-1",
+      "payment": {
+        "amount": 35400,
+        "date": "2030-01-12",
+        "mode": "UPI",
+        "reference": "UTR-002"
+      },
+      "pdfFile": "ACME-1.pdf",
+      "pdfUpdatedAt": "<timestamp>",
+      "recipientEmail": "ap@globex.example",
+      "recurringId": null,
+      "sentAt": null,
+      "sentTo": null,
+      "shipTo": {
+        "addressLines": [
+          "9 Industrial Way",
+          "Pune 411001"
+        ]
+      },
+      "status": "paid",
+      "subTotal": 30000,
+      "taxLabel": "IGST",
+      "taxTotal": 5400,
+      "terms": "Net 15",
+      "total": 35400,
+      "updatedAt": "<timestamp>"
+    }
+  },
+  {
+    "step": "reminders: pending ones cancel when invoice is paid",
+    "request": {
+      "method": "GET",
+      "path": "/api/invoices/<id#5>/reminders"
+    },
+    "status": 200,
+    "response": [
+      {
+        "createdAt": "<timestamp>",
+        "dueOn": "2030-01-13",
+        "error": null,
+        "id": "<id#7>",
+        "invoiceId": "<id#5>",
+        "offsetDays": -3,
+        "sentAt": null,
+        "sentTo": null,
+        "status": "cancelled"
+      },
+      {
+        "createdAt": "<timestamp>",
+        "dueOn": "2030-01-23",
+        "error": null,
+        "id": "<id#8>",
+        "invoiceId": "<id#5>",
+        "offsetDays": 7,
+        "sentAt": null,
+        "sentTo": null,
+        "status": "cancelled"
+      }
+    ]
+  },
+  {
+    "step": "invoices: paid invoices cannot be edited",
+    "request": {
+      "method": "PUT",
+      "path": "/api/invoices/<id#5>"
+    },
+    "status": 400,
+    "response": {
+      "error": "Paid invoices cannot be edited"
+    }
+  },
+  {
+    "step": "payments: unpay archives the ledger",
+    "request": {
+      "method": "POST",
+      "path": "/api/invoices/<id#5>/unpay"
+    },
+    "status": 200,
+    "response": {
+      "amountInWords": "United States Dollar Thirty-Five Thousand Four Hundred",
+      "amountPaid": 0,
+      "balanceDue": 35400,
+      "billTo": {
+        "addressLines": [
+          "9 Industrial Way",
+          "Pune 411001"
+        ],
+        "gstin": "27FGHIJ5678K1Z2",
+        "name": "Globex Limited"
+      },
+      "business": {
+        "addressLines": [
+          "12 Example Road",
+          "Bengaluru 560001"
+        ],
+        "gstin": "29ABCDE1234F1Z5",
+        "logo": null,
+        "logoBg": "light",
+        "name": "Acme Consulting"
+      },
+      "createdAt": "<timestamp>",
+      "currency": "₹",
+      "customerId": "<id#2>",
+      "dueDate": "2030-01-16",
+      "id": "<id#5>",
+      "invoiceDate": "2030-01-01",
+      "items": [
+        {
+          "description": "Consulting hour",
+          "qty": 12,
+          "rate": 2500,
+          "taxPct": 18
+        }
+      ],
+      "notes": "Thanks for your business.",
+      "number": "ACME-1",
+      "payment": null,
+      "pdfFile": "ACME-1.pdf",
+      "pdfUpdatedAt": "<timestamp>",
+      "recipientEmail": "ap@globex.example",
+      "recurringId": null,
+      "sentAt": null,
+      "sentTo": null,
+      "shipTo": {
+        "addressLines": [
+          "9 Industrial Way",
+          "Pune 411001"
+        ]
+      },
+      "status": "draft",
+      "subTotal": 30000,
+      "taxLabel": "IGST",
+      "taxTotal": 5400,
+      "terms": "Net 15",
+      "total": 35400,
+      "updatedAt": "<timestamp>"
+    }
+  },
+  {
+    "step": "invoices: status reverts after unpay",
+    "request": {
+      "method": "GET",
+      "path": "/api/invoices/<id#5>"
+    },
+    "status": 200,
+    "response": {
+      "amountInWords": "United States Dollar Thirty-Five Thousand Four Hundred",
+      "amountPaid": 0,
+      "balanceDue": 35400,
+      "billTo": {
+        "addressLines": [
+          "9 Industrial Way",
+          "Pune 411001"
+        ],
+        "gstin": "27FGHIJ5678K1Z2",
+        "name": "Globex Limited"
+      },
+      "business": {
+        "addressLines": [
+          "12 Example Road",
+          "Bengaluru 560001"
+        ],
+        "gstin": "29ABCDE1234F1Z5",
+        "logo": null,
+        "logoBg": "light",
+        "name": "Acme Consulting"
+      },
+      "createdAt": "<timestamp>",
+      "currency": "₹",
+      "customerId": "<id#2>",
+      "dueDate": "2030-01-16",
+      "id": "<id#5>",
+      "invoiceDate": "2030-01-01",
+      "items": [
+        {
+          "description": "Consulting hour",
+          "qty": 12,
+          "rate": 2500,
+          "taxPct": 18
+        }
+      ],
+      "notes": "Thanks for your business.",
+      "number": "ACME-1",
+      "payment": null,
+      "pdfFile": "ACME-1.pdf",
+      "pdfUpdatedAt": "<timestamp>",
+      "recipientEmail": "ap@globex.example",
+      "recurringId": null,
+      "sentAt": null,
+      "sentTo": null,
+      "shipTo": {
+        "addressLines": [
+          "9 Industrial Way",
+          "Pune 411001"
+        ]
+      },
+      "status": "draft",
+      "subTotal": 30000,
+      "taxLabel": "IGST",
+      "taxTotal": 5400,
+      "terms": "Net 15",
+      "total": 35400,
+      "updatedAt": "<timestamp>"
+    }
+  },
+  {
+    "step": "recurring: create",
+    "request": {
+      "method": "POST",
+      "path": "/api/recurring"
+    },
+    "status": 200,
+    "response": {
+      "active": true,
+      "autoSend": false,
+      "createdAt": "<timestamp>",
+      "customerId": "<id#2>",
+      "dayOfMonth": 1,
+      "frequency": "monthly",
+      "id": "<id#10>",
+      "items": [
+        {
+          "description": "Retainer",
+          "qty": 1,
+          "rate": 50000,
+          "taxPct": 18
+        }
+      ],
+      "lastGeneratedAt": null,
+      "nextRunDate": "2030-02-01",
+      "notes": "Monthly retainer",
+      "taxLabel": "IGST",
+      "terms": "Net 30"
+    }
+  },
+  {
+    "step": "recurring: run now mints an invoice and advances nextRunDate",
+    "request": {
+      "method": "POST",
+      "path": "/api/recurring/<id#10>/run"
+    },
+    "status": 200,
+    "response": {
+      "amountInWords": "United States Dollar Fifty-Nine Thousand",
+      "amountPaid": 0,
+      "balanceDue": 59000,
+      "billTo": {
+        "addressLines": [
+          "9 Industrial Way",
+          "Pune 411001"
+        ],
+        "gstin": "27FGHIJ5678K1Z2",
+        "name": "Globex Limited"
+      },
+      "business": {
+        "addressLines": [
+          "12 Example Road",
+          "Bengaluru 560001"
+        ],
+        "gstin": "29ABCDE1234F1Z5",
+        "logo": null,
+        "logoBg": "light",
+        "name": "Acme Consulting"
+      },
+      "createdAt": "<timestamp>",
+      "currency": "₹",
+      "customerId": "<id#2>",
+      "dueDate": "2030-03-03",
+      "id": "<id#11>",
+      "invoiceDate": "2030-02-01",
+      "items": [
+        {
+          "description": "Retainer",
+          "qty": 1,
+          "rate": 50000,
+          "taxPct": 18
+        }
+      ],
+      "notes": "Monthly retainer",
+      "number": "ACME-2",
+      "payment": null,
+      "pdfFile": "ACME-2.pdf",
+      "pdfUpdatedAt": "<timestamp>",
+      "recipientEmail": "ap@globex.example",
+      "recurringId": "<id#10>",
+      "sentAt": null,
+      "sentTo": null,
+      "shipTo": {
+        "addressLines": [
+          "9 Industrial Way",
+          "Pune 411001"
+        ]
+      },
+      "status": "draft",
+      "subTotal": 50000,
+      "taxLabel": "IGST",
+      "taxTotal": 9000,
+      "terms": "Net 30",
+      "total": 59000,
+      "updatedAt": "<timestamp>"
+    }
+  },
+  {
+    "step": "recurring: list",
+    "request": {
+      "method": "GET",
+      "path": "/api/recurring"
+    },
+    "status": 200,
+    "response": [
+      {
+        "active": true,
+        "autoSend": false,
+        "createdAt": "<timestamp>",
+        "customerId": "<id#2>",
+        "dayOfMonth": 1,
+        "frequency": "monthly",
+        "id": "<id#10>",
+        "items": [
+          {
+            "description": "Retainer",
+            "qty": 1,
+            "rate": 50000,
+            "taxPct": 18
+          }
+        ],
+        "lastGeneratedAt": "<timestamp>",
+        "nextRunDate": "2030-03-01",
+        "notes": "Monthly retainer",
+        "taxLabel": "IGST",
+        "terms": "Net 30"
+      }
+    ]
+  },
+  {
+    "step": "recurring: update",
+    "request": {
+      "method": "PUT",
+      "path": "/api/recurring/<id#10>"
+    },
+    "status": 200,
+    "response": {
+      "active": false,
+      "autoSend": false,
+      "createdAt": "<timestamp>",
+      "customerId": "<id#2>",
+      "dayOfMonth": 1,
+      "frequency": "monthly",
+      "id": "<id#10>",
+      "items": [
+        {
+          "description": "Retainer",
+          "qty": 1,
+          "rate": 50000,
+          "taxPct": 18
+        }
+      ],
+      "lastGeneratedAt": "<timestamp>",
+      "nextRunDate": "2030-03-01",
+      "notes": "Monthly retainer",
+      "taxLabel": "IGST",
+      "terms": "Net 45"
+    }
+  },
+  {
+    "step": "invoices: list before archive",
+    "request": {
+      "method": "GET",
+      "path": "/api/invoices"
+    },
+    "status": 200,
+    "response": [
+      {
+        "amountInWords": "United States Dollar Fifty-Nine Thousand",
+        "amountPaid": 0,
+        "balanceDue": 59000,
+        "billTo": {
+          "addressLines": [
+            "9 Industrial Way",
+            "Pune 411001"
+          ],
+          "gstin": "27FGHIJ5678K1Z2",
+          "name": "Globex Limited"
+        },
+        "business": {
+          "addressLines": [
+            "12 Example Road",
+            "Bengaluru 560001"
+          ],
+          "gstin": "29ABCDE1234F1Z5",
+          "logo": null,
+          "logoBg": "light",
+          "name": "Acme Consulting"
+        },
+        "createdAt": "<timestamp>",
+        "currency": "₹",
+        "customerId": "<id#2>",
+        "dueDate": "2030-03-03",
+        "id": "<id#11>",
+        "invoiceDate": "2030-02-01",
+        "items": [
+          {
+            "description": "Retainer",
+            "qty": 1,
+            "rate": 50000,
+            "taxPct": 18
+          }
+        ],
+        "notes": "Monthly retainer",
+        "number": "ACME-2",
+        "payment": null,
+        "pdfFile": "ACME-2.pdf",
+        "pdfUpdatedAt": "<timestamp>",
+        "recipientEmail": "ap@globex.example",
+        "recurringId": "<id#10>",
+        "sentAt": null,
+        "sentTo": null,
+        "shipTo": {
+          "addressLines": [
+            "9 Industrial Way",
+            "Pune 411001"
+          ]
+        },
+        "status": "draft",
+        "subTotal": 50000,
+        "taxLabel": "IGST",
+        "taxTotal": 9000,
+        "terms": "Net 30",
+        "total": 59000,
+        "updatedAt": "<timestamp>"
+      },
+      {
+        "amountInWords": "United States Dollar Thirty-Five Thousand Four Hundred",
+        "amountPaid": 0,
+        "balanceDue": 35400,
+        "billTo": {
+          "addressLines": [
+            "9 Industrial Way",
+            "Pune 411001"
+          ],
+          "gstin": "27FGHIJ5678K1Z2",
+          "name": "Globex Limited"
+        },
+        "business": {
+          "addressLines": [
+            "12 Example Road",
+            "Bengaluru 560001"
+          ],
+          "gstin": "29ABCDE1234F1Z5",
+          "logo": null,
+          "logoBg": "light",
+          "name": "Acme Consulting"
+        },
+        "createdAt": "<timestamp>",
+        "currency": "₹",
+        "customerId": "<id#2>",
+        "dueDate": "2030-01-16",
+        "id": "<id#5>",
+        "invoiceDate": "2030-01-01",
+        "items": [
+          {
+            "description": "Consulting hour",
+            "qty": 12,
+            "rate": 2500,
+            "taxPct": 18
+          }
+        ],
+        "notes": "Thanks for your business.",
+        "number": "ACME-1",
+        "payment": null,
+        "pdfFile": "ACME-1.pdf",
+        "pdfUpdatedAt": "<timestamp>",
+        "recipientEmail": "ap@globex.example",
+        "recurringId": null,
+        "sentAt": null,
+        "sentTo": null,
+        "shipTo": {
+          "addressLines": [
+            "9 Industrial Way",
+            "Pune 411001"
+          ]
+        },
+        "status": "draft",
+        "subTotal": 30000,
+        "taxLabel": "IGST",
+        "taxTotal": 5400,
+        "terms": "Net 15",
+        "total": 35400,
+        "updatedAt": "<timestamp>"
+      }
+    ]
+  },
+  {
+    "step": "invoices: archive",
+    "request": {
+      "method": "DELETE",
+      "path": "/api/invoices/<id#5>"
+    },
+    "status": 200,
+    "response": {
+      "ok": true
+    }
+  },
+  {
+    "step": "invoices: archived row disappears from list",
+    "request": {
+      "method": "GET",
+      "path": "/api/invoices"
+    },
+    "status": 200,
+    "response": [
+      {
+        "amountInWords": "United States Dollar Fifty-Nine Thousand",
+        "amountPaid": 0,
+        "balanceDue": 59000,
+        "billTo": {
+          "addressLines": [
+            "9 Industrial Way",
+            "Pune 411001"
+          ],
+          "gstin": "27FGHIJ5678K1Z2",
+          "name": "Globex Limited"
+        },
+        "business": {
+          "addressLines": [
+            "12 Example Road",
+            "Bengaluru 560001"
+          ],
+          "gstin": "29ABCDE1234F1Z5",
+          "logo": null,
+          "logoBg": "light",
+          "name": "Acme Consulting"
+        },
+        "createdAt": "<timestamp>",
+        "currency": "₹",
+        "customerId": "<id#2>",
+        "dueDate": "2030-03-03",
+        "id": "<id#11>",
+        "invoiceDate": "2030-02-01",
+        "items": [
+          {
+            "description": "Retainer",
+            "qty": 1,
+            "rate": 50000,
+            "taxPct": 18
+          }
+        ],
+        "notes": "Monthly retainer",
+        "number": "ACME-2",
+        "payment": null,
+        "pdfFile": "ACME-2.pdf",
+        "pdfUpdatedAt": "<timestamp>",
+        "recipientEmail": "ap@globex.example",
+        "recurringId": "<id#10>",
+        "sentAt": null,
+        "sentTo": null,
+        "shipTo": {
+          "addressLines": [
+            "9 Industrial Way",
+            "Pune 411001"
+          ]
+        },
+        "status": "draft",
+        "subTotal": 50000,
+        "taxLabel": "IGST",
+        "taxTotal": 9000,
+        "terms": "Net 30",
+        "total": 59000,
+        "updatedAt": "<timestamp>"
+      }
+    ]
+  },
+  {
+    "step": "orgs: summary counts reflect archival",
+    "request": {
+      "method": "GET",
+      "path": "/api/orgs"
+    },
+    "status": 200,
+    "response": {
+      "currentOrgId": "<id#1>",
+      "orgs": [
+        {
+          "createdAt": "<timestamp>",
+          "customerCount": 1,
+          "id": "<id#1>",
+          "invoiceCount": 1,
+          "name": "Acme Consulting"
+        }
+      ]
+    }
+  },
+  {
+    "step": "orgs: create a second org",
+    "request": {
+      "method": "POST",
+      "path": "/api/orgs"
+    },
+    "status": 200,
+    "response": {
+      "createdAt": "<timestamp>",
+      "customerCount": 0,
+      "id": "<id#12>",
+      "invoiceCount": 0,
+      "name": "Initech"
+    }
+  },
+  {
+    "step": "customers: new org starts empty",
+    "request": {
+      "method": "GET",
+      "path": "/api/customers"
+    },
+    "status": 200,
+    "response": []
+  },
+  {
+    "step": "invoices: new org starts empty",
+    "request": {
+      "method": "GET",
+      "path": "/api/invoices"
+    },
+    "status": 200,
+    "response": []
+  },
+  {
+    "step": "orgs: activate the first again",
+    "request": {
+      "method": "POST",
+      "path": "/api/orgs/<id#1>/activate"
+    },
+    "status": 200,
+    "response": {
+      "currentOrgId": "<id#1>"
+    }
+  },
+  {
+    "step": "customers: first org data is intact",
+    "request": {
+      "method": "GET",
+      "path": "/api/customers"
+    },
+    "status": 200,
+    "response": [
+      {
+        "billingAddressLines": [
+          "9 Industrial Way",
+          "Pune 411001"
+        ],
+        "ccEmail": "finance@globex.example",
+        "createdAt": "<timestamp>",
+        "email": "ap@globex.example",
+        "gstin": "27FGHIJ5678K1Z2",
+        "id": "<id#2>",
+        "name": "Globex Limited",
+        "shipToAddressLines": [
+          "Warehouse 4",
+          "Pune 411002"
+        ]
+      }
+    ]
+  },
+  {
+    "step": "orgs: archive the second",
+    "request": {
+      "method": "DELETE",
+      "path": "/api/orgs/<id#12>"
+    },
+    "status": 200,
+    "response": {
+      "currentOrgId": "<id#1>",
+      "ok": true
+    }
+  },
+  {
+    "step": "google: status without credentials",
+    "request": {
+      "method": "GET",
+      "path": "/api/google/status"
+    },
+    "status": 200,
+    "response": {
+      "configured": false,
+      "connected": false,
+      "email": null
+    }
+  }
+]

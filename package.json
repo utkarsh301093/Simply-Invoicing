@@ -6,7 +6,12 @@
   "type": "commonjs",
   "scripts": {
     "start": "node server/index.js",
-    "dev": "node server/index.js"
+    "dev": "node server/index.js",
+    "test": "TEST_DATABASE_URL=${TEST_DATABASE_URL:-postgresql://postgres:test@127.0.0.1:55434/invoicing_test} node --test test/*.test.js",
+    "test:update": "UPDATE_GOLDEN=1 npm test",
+    "test:db:up": "./scripts/test-db.sh up",
+    "test:db:down": "./scripts/test-db.sh down",
+    "migrate": "node scripts/migrate-to-supabase.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
@@ -15,6 +20,7 @@
     "googleapis": "^140.0.1",
     "nodemailer": "^6.9.14",
     "pdfkit": "^0.15.2",
+    "pg": "^8.22.0",
     "svg-to-pdfkit": "^0.1.8"
   }
 }

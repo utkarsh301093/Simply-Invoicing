@@ -6,11 +6,13 @@
 const fs = require('fs');
 const path = require('path');
 
-const DATA_DIR = path.join(__dirname, '..', 'data');
+// DATA_DIR is overridable so tests (and alternate deployments) can point at a
+// throwaway directory instead of the real data/.
+const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(__dirname, '..', 'data');
 const DB_FILE = path.join(DATA_DIR, 'db.json');
 const INVOICES_DIR = path.join(DATA_DIR, 'invoices'); // saved PDF copies (per-org subdirs)
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 // Empty, current-shape database.
 function emptyDb() {
@@ -25,12 +27,13 @@ function emptyDb() {
     invoices: [],
     payments: [],
     recurringSchedules: [],
+    reminders: [],
     activity: [],
   };
 }
 
 // Collections that follow the standard record envelope.
-const COLLECTIONS = ['organizations', 'customers', 'items', 'taxRates', 'invoices', 'payments', 'recurringSchedules', 'activity'];
+const COLLECTIONS = ['organizations', 'customers', 'items', 'taxRates', 'invoices', 'payments', 'recurringSchedules', 'reminders', 'activity'];
 
 let db = null;
 
@@ -56,7 +59,7 @@ function orgDefaults() {
   return {
     profile: { businessName: 'My Business', addressLines: [], taxId: '', email: '', phone: '', website: '' },
     branding: { logo: null, logoBackground: 'light' },
-    defaults: { currency: '$', taxLabel: 'IGST', terms: 'Net 15', notes: '' },
+    defaults: { currency: '$', taxLabel: 'IGST', terms: 'Net 15', notes: '', reminderOffsets: [0] },
     numbering: { invoicePrefix: 'INV-', nextNumber: 1 },
   };
 }
@@ -64,8 +67,10 @@ function orgDefaults() {
 // ── Migration ────────────────────────────────────────────────
 // Bring any older DB shape up to the current normalized schema.
 function migrate(raw) {
-  // Already current.
-  if (raw && raw.schemaVersion === SCHEMA_VERSION && Array.isArray(raw.organizations)) {
+  // Already normalized (v2+). v2 → v3 only adds the `reminders` collection and
+  // org.defaults.reminderOffsets, both of which backfill() fills in.
+  if (raw && raw.schemaVersion >= 2 && Array.isArray(raw.organizations)) {
+    raw.schemaVersion = SCHEMA_VERSION;
     return backfill(raw);
   }
 
@@ -186,7 +191,7 @@ function backfill(d) {
     if (!org.name) org.name = org.profile.businessName;
     ensureEnvelope(org);
   }
-  for (const k of ['customers', 'items', 'taxRates', 'invoices', 'payments', 'recurringSchedules', 'activity']) {
+  for (const k of ['customers', 'items', 'taxRates', 'invoices', 'payments', 'recurringSchedules', 'reminders', 'activity']) {
     for (const rec of d[k]) ensureEnvelope(rec);
   }
   // currentOrgId must point at a live org.

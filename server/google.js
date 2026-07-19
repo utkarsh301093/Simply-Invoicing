@@ -1,7 +1,18 @@
 // Google OAuth2 connect + Gmail send (with PDF attachment).
 const { google } = require('googleapis');
 const nodemailer = require('nodemailer');
-const store = require('./store');
+const db = require('./db');
+
+// The connection is cached in memory so status() can stay synchronous — it is
+// called from request handlers and from the hourly reminder sweep, and neither
+// wants to await a query just to learn whether Gmail is wired up. load() runs
+// once at boot; every write path updates the cache in the same step.
+let cached = null;
+
+async function load() {
+  cached = await db.integrations.getGoogle();
+  return cached;
+}
 
 const SCOPES = [
   'https://www.googleapis.com/auth/gmail.send',
@@ -42,18 +53,20 @@ async function handleCallback(code) {
   const oauth2 = google.oauth2({ version: 'v2', auth: client });
   const me = await oauth2.userinfo.get();
 
-  const db = store.get();
-  db.integrations.google = {
+  // Google only returns a refresh_token on first consent; keep the stored one
+  // if this exchange didn't include a fresh one.
+  const record = {
     email: me.data.email,
-    refreshToken: tokens.refresh_token || (db.integrations.google && db.integrations.google.refreshToken) || null,
+    refreshToken: tokens.refresh_token || (cached && cached.refreshToken) || null,
     connectedAt: new Date().toISOString(),
   };
-  store.save();
-  return db.integrations.google;
+  await db.integrations.setGoogle(record);
+  cached = record;
+  return record;
 }
 
 function connection() {
-  return store.get().integrations.google;
+  return cached;
 }
 
 function status() {
@@ -65,9 +78,9 @@ function status() {
   };
 }
 
-function disconnect() {
-  store.get().integrations.google = null;
-  store.save();
+async function disconnect() {
+  await db.integrations.clearGoogle();
+  cached = null;
 }
 
 // Build a Gmail OAuth2 nodemailer transport from the stored refresh token.
@@ -90,16 +103,15 @@ function transport() {
 }
 
 // pdfBase64: raw base64 (no data: prefix). attachmentName e.g. "INV-1001.pdf".
-async function sendInvoiceEmail({ to, cc, subject, text, html, pdfBase64, attachmentName }) {
+async function sendInvoiceEmail({ to, cc, subject, text, html, pdfBase64, attachmentName, fromName }) {
   const g = connection();
-  const org = store.activeOrg();
-  const fromName = (org && org.profile.businessName) || 'Invoices';
   const tx = transport();
+  const sender = fromName || 'Invoices';
   const attachments = pdfBase64
     ? [{ filename: attachmentName || 'invoice.pdf', content: Buffer.from(pdfBase64, 'base64'), contentType: 'application/pdf' }]
     : [];
   const info = await tx.sendMail({
-    from: `${fromName} <${g.email}>`,
+    from: `${sender} <${g.email}>`,
     to,
     cc: cc || undefined,
     subject,
@@ -110,4 +122,4 @@ async function sendInvoiceEmail({ to, cc, subject, text, html, pdfBase64, attach
   return { messageId: info.messageId, from: g.email };
 }
 
-module.exports = { isConfigured, authUrl, handleCallback, status, disconnect, sendInvoiceEmail };
+module.exports = { isConfigured, authUrl, handleCallback, status, disconnect, sendInvoiceEmail, load };

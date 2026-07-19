@@ -1,17 +1,16 @@
 require('dotenv').config();
 const path = require('path');
-const fs = require('fs');
 const express = require('express');
-const store = require('./store');
+const db = require('./db');
+const storage = require('./storage');
 const google = require('./google');
 const { renderInvoicePdf } = require('./pdf');
 const { buildWorkbook } = require('./export');
 const { computeTotals, amountToWords, round2 } = require('./invoice');
+const emailTemplates = require('./emailTemplates');
 
 const app = express();
-app.use(express.json({ limit: '15mb' })); // PDFs/logos arrive as base64 data URLs
-
-store.load();
+app.use(express.json({ limit: '15mb' })); // logos arrive as base64 data URLs
 
 // ─────────────────────────────────────────────────────────────
 // Storage ⇄ API mapping layer
@@ -20,12 +19,12 @@ store.load();
 // shapes. These translators are the single place that bridges the two, so the schema
 // can grow without touching the frontend or PDF renderer.
 // ─────────────────────────────────────────────────────────────
-const now = () => store.nowISO();
+const now = () => db.nowISO();
 
 // Line item: stored {quantity, taxPercent} ⇄ API {qty, taxPct}.
 function lineItemToApi(li) { return { description: li.description, qty: li.quantity, rate: li.rate, taxPct: li.taxPercent }; }
 function lineItemFromApi(it) {
-  return { id: store.id('li'), description: it.description || '', quantity: Number(it.qty) || 0, rate: Number(it.rate) || 0, taxPercent: Number(it.taxPct) || 0 };
+  return { id: db.id('li'), description: it.description || '', quantity: Number(it.qty) || 0, rate: Number(it.rate) || 0, taxPercent: Number(it.taxPct) || 0 };
 }
 
 // Org config ⇄ flat "settings" object the frontend uses.
@@ -35,23 +34,37 @@ function settingsView(org) {
     currency: org.defaults.currency, logo: org.branding.logo, logoBg: org.branding.logoBackground,
     invoicePrefix: org.numbering.invoicePrefix, nextNumber: org.numbering.nextNumber,
     defaultTerms: org.defaults.terms, defaultTaxLabel: org.defaults.taxLabel, defaultNotes: org.defaults.notes,
+    reminderOffsets: org.defaults.reminderOffsets || [0],
   };
 }
-function applySettings(org, body) {
+
+// Mutates the in-memory org record; the caller persists it with db.orgs.save().
+// The logo is the one field that needs I/O: it arrives as a data URL and is
+// written to Storage, leaving only a path on the row.
+async function applySettings(org, body) {
   const put = (obj, key, val) => { if (val !== undefined) obj[key] = val; };
   put(org.profile, 'businessName', body.businessName);
   put(org.profile, 'addressLines', body.addressLines);
   put(org.profile, 'taxId', body.gstin);
   put(org.defaults, 'currency', body.currency);
-  put(org.branding, 'logo', body.logo);
+  if (body.logo !== undefined) {
+    if (!body.logo) {
+      org.branding.logoPath = null;
+      org.branding.logo = null;
+    } else if (body.logo.startsWith('data:')) {
+      const p = await db.putLogo(org.id, body.logo);
+      if (p !== undefined) { org.branding.logoPath = p; org.branding.logo = body.logo; }
+    }
+    // An unchanged non-data-URL value means "leave the existing logo alone".
+  }
   put(org.branding, 'logoBackground', body.logoBg);
   put(org.numbering, 'invoicePrefix', body.invoicePrefix);
   if (body.nextNumber !== undefined) org.numbering.nextNumber = Number(body.nextNumber) || 1;
   put(org.defaults, 'terms', body.defaultTerms);
   put(org.defaults, 'taxLabel', body.defaultTaxLabel);
   put(org.defaults, 'notes', body.defaultNotes);
+  if (body.reminderOffsets !== undefined) org.defaults.reminderOffsets = sanitizeOffsets(body.reminderOffsets);
   if (org.profile.businessName) org.name = org.profile.businessName;
-  org.updatedAt = now();
 }
 
 function customerView(c) {
@@ -70,19 +83,13 @@ function recurringView(r) {
   };
 }
 
-function paymentsForInvoice(db, invoiceId) {
-  return db.payments.filter((p) => !p.archivedAt && p.invoiceId === invoiceId);
-}
-
-// Invoice view: flattens the snapshot and derives paid-state from the payments ledger.
-function invoiceView(db, inv) {
-  const pays = paymentsForInvoice(db, inv.id);
-  const amountPaid = round2(pays.reduce((s, p) => s + (Number(p.amount) || 0), 0));
+// Invoice view. Paid-state comes from the invoice_balances view rather than
+// being recomputed here, but the derived-status precedence is unchanged:
+// void → paid → sent → draft.
+function invoiceView(inv) {
+  const { amountPaid, balanceDue, isPaid } = inv.balance;
   const total = inv.amounts.total;
-  const balanceDue = round2(Math.max(0, total - amountPaid));
-  const paid = amountPaid > 0 && balanceDue <= 0;
-  const status = inv.voidedAt ? 'void' : paid ? 'paid' : inv.sentAt ? 'sent' : 'draft';
-  const latest = pays.slice().sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0];
+  const status = inv.voidedAt ? 'void' : isPaid ? 'paid' : inv.sentAt ? 'sent' : 'draft';
   const s = inv.snapshot;
   return {
     id: inv.id, number: inv.number, status, customerId: inv.customerId,
@@ -94,8 +101,8 @@ function invoiceView(db, inv) {
     items: inv.lineItems.map(lineItemToApi),
     notes: inv.notes, currency: inv.currency,
     subTotal: inv.amounts.subTotal, taxTotal: inv.amounts.taxTotal, total,
-    amountPaid, balanceDue, amountInWords: amountToWords(total),
-    payment: latest ? { mode: latest.mode, date: latest.date, reference: latest.reference, amount: latest.amount } : null,
+    amountPaid: round2(amountPaid), balanceDue: round2(balanceDue), amountInWords: amountToWords(total),
+    payment: inv.latestPayment,
     sentAt: inv.sentAt, sentTo: inv.sentTo, recurringId: inv.recurringScheduleId,
     createdAt: inv.createdAt, updatedAt: inv.updatedAt,
     pdfFile: inv.pdf.file, pdfUpdatedAt: inv.pdf.updatedAt,
@@ -105,32 +112,41 @@ function invoiceView(db, inv) {
 // ─────────────────────────────────────────────────────────────
 // Org scoping — every data route works inside the active org
 // ─────────────────────────────────────────────────────────────
-function requireOrg(res) {
-  const org = store.activeOrg();
+async function requireOrg(res) {
+  const org = await db.activeOrg();
   if (!org) { res.status(400).json({ error: 'No organization selected. Create one first.' }); return null; }
   return org;
 }
 
-function logActivity(db, orgId, type, refType, refId, message) {
-  db.activity.push({ id: store.id('act'), orgId, type, refType, refId, message, at: now(), metadata: {} });
+// Every route body now performs I/O, so a thrown error must not hang the
+// request or take the process down. This wrapper is the single place that
+// turns an unexpected failure into a 500.
+function route(handler) {
+  return (req, res) => {
+    Promise.resolve(handler(req, res)).catch((e) => {
+      console.error(`${req.method} ${req.path} failed:`, e.message);
+      if (!res.headersSent) res.status(500).json({ error: e.message });
+    });
+  };
 }
 
 // ─────────────────────────────────────────────────────────────
 // Invoice building / numbering / PDF
 // ─────────────────────────────────────────────────────────────
-function buildStoredInvoice(org, body, number) {
-  const customer = store.rows('customers', org.id).find((c) => c.id === body.customerId);
+async function buildStoredInvoice(org, body, number) {
+  const customer = await db.customers.byId(org.id, body.customerId);
   if (!customer) throw new Error('Customer not found');
   const lineItems = (body.items || []).map(lineItemFromApi);
   const totals = computeTotals(lineItems.map(lineItemToApi));
   const useShip = body.shipToSameAsBilling === false && customer.shippingAddress.lines.length;
   return {
-    id: store.id('inv'), orgId: org.id, number,
+    id: db.id('inv'), orgId: org.id, number,
     customerId: customer.id, recurringScheduleId: body.recurringId || null,
     invoiceDate: body.invoiceDate, dueDate: body.dueDate, terms: body.terms || org.defaults.terms,
     currency: org.defaults.currency, taxLabel: body.taxLabel || org.defaults.taxLabel,
     snapshot: {
-      seller: { businessName: org.profile.businessName, addressLines: org.profile.addressLines, taxId: org.profile.taxId, logo: org.branding.logo || null, logoBackground: org.branding.logoBackground || 'light' },
+      // logoPath is what persists; logo (the data URL) is re-resolved on read.
+      seller: { businessName: org.profile.businessName, addressLines: org.profile.addressLines, taxId: org.profile.taxId, logoPath: org.branding.logoPath || null, logo: org.branding.logo || null, logoBackground: org.branding.logoBackground || 'light' },
       billTo: { name: customer.name, addressLines: customer.billingAddress.lines || [], taxId: customer.taxId || '' },
       shipTo: { addressLines: useShip ? customer.shippingAddress.lines : (customer.billingAddress.lines || []) },
       recipientEmail: customer.email || '',
@@ -138,27 +154,34 @@ function buildStoredInvoice(org, body, number) {
     lineItems, amounts: totals,
     notes: body.notes != null ? body.notes : org.defaults.notes,
     sentAt: null, sentTo: null, voidedAt: null,
-    pdf: { file: null, updatedAt: null },
-    ...store.envelope(),
+    pdf: { file: null, path: null, updatedAt: null },
+    balance: { amountPaid: 0, balanceDue: totals.total, isPaid: false },
+    latestPayment: null,
+    createdAt: now(), updatedAt: now(), archivedAt: null, metadata: {},
   };
 }
 
-function nextInvoiceNumber(org) {
-  const n = org.numbering.nextNumber || 1;
-  org.numbering.nextNumber = n + 1;
-  return `${org.numbering.invoicePrefix || 'INV-'}${n}`;
+// Snapshots persist a logo path, not the bytes — strip the inline copy so the
+// stored row stays small (it was ~45KB of base64 per invoice).
+function snapshotForStorage(snapshot) {
+  const s = JSON.parse(JSON.stringify(snapshot));
+  if (s.seller) delete s.seller.logo;
+  return s;
 }
 
-// Render the invoice to a vector PDF and save a copy under data/invoices/<org>/.
-// Never throws (logs on failure).
-async function saveInvoicePdf(db, org, inv) {
+function pdfPathFor(orgId, number) {
+  const safeNum = String(number).replace(/[^a-zA-Z0-9._-]/g, '_');
+  return `invoices/${orgId}/${safeNum}.pdf`;
+}
+
+// Render the invoice to a vector PDF and store it. Never throws (logs on failure).
+async function saveInvoicePdf(org, inv) {
   try {
-    const buf = await renderInvoicePdf(invoiceView(db, inv), settingsView(org));
-    const file = store.pdfPathFor(inv.number, org.id);
-    const tmp = file + '.tmp';
-    fs.writeFileSync(tmp, buf);
-    fs.renameSync(tmp, file);
-    inv.pdf = { file: path.basename(file), updatedAt: now() };
+    const buf = await renderInvoicePdf(invoiceView(inv), settingsView(org));
+    const p = pdfPathFor(org.id, inv.number);
+    await storage.put(p, buf, 'application/pdf');
+    await db.invoices.setPdf(inv.id, p);
+    inv.pdf = { file: p.split('/').pop(), path: p, updatedAt: now() };
     return buf;
   } catch (e) {
     console.error('PDF render failed for', inv.number, e.message);
@@ -166,15 +189,15 @@ async function saveInvoicePdf(db, org, inv) {
   }
 }
 
-// Read the stored PDF, regenerating it if missing/stale.
-async function getInvoicePdf(db, org, inv) {
-  const file = store.pdfPathFor(inv.number, org.id);
-  if (inv.pdf.file && fs.existsSync(file) && (!inv.pdf.updatedAt || inv.pdf.updatedAt >= inv.updatedAt)) {
-    return fs.readFileSync(file);
+// Read the stored PDF, regenerating if missing or stale.
+async function getInvoicePdf(org, inv) {
+  if (inv.pdf.path && (!inv.pdf.updatedAt || inv.pdf.updatedAt >= inv.updatedAt)) {
+    const buf = await storage.get(inv.pdf.path);
+    if (buf) return buf;
   }
-  const buf = await saveInvoicePdf(db, org, inv);
-  store.save();
-  return buf || fs.readFileSync(file);
+  const buf = await saveInvoicePdf(org, inv);
+  if (buf) return buf;
+  throw new Error('Could not render or retrieve the invoice PDF.');
 }
 
 function addDays(dateStr, days) {
@@ -187,281 +210,251 @@ function termsToDays(terms) { const m = /net\s*(\d+)/i.exec(terms || ''); return
 // ─────────────────────────────────────────────────────────────
 // Organizations
 // ─────────────────────────────────────────────────────────────
-function orgSummary(o) {
-  return {
-    id: o.id, name: o.profile.businessName || o.name, createdAt: o.createdAt,
-    invoiceCount: store.rows('invoices', o.id).length, customerCount: store.rows('customers', o.id).length,
-  };
+async function orgSummary(o) {
+  const counts = await db.orgs.counts(o.id);
+  return { id: o.id, name: o.profile.businessName || o.name, createdAt: o.createdAt, ...counts };
 }
 
-app.get('/api/orgs', (req, res) => {
-  const db = store.get();
-  res.json({ currentOrgId: db.meta.currentOrgId, orgs: db.organizations.filter((o) => !o.archivedAt).map(orgSummary) });
-});
+app.get('/api/orgs', route(async (req, res) => {
+  const [currentOrgId, list] = await Promise.all([db.appState.currentOrgId(), db.orgs.listActive()]);
+  const orgs = await Promise.all(list.map(orgSummary));
+  // currentOrgId must point at a live org; fall back the way activeOrg() does.
+  const effective = orgs.some((o) => o.id === currentOrgId) ? currentOrgId : (orgs[0] ? orgs[0].id : null);
+  res.json({ currentOrgId: effective, orgs });
+}));
 
-app.post('/api/orgs', (req, res) => {
-  const db = store.get();
+app.post('/api/orgs', route(async (req, res) => {
   const name = (req.body.businessName || req.body.name || '').trim();
   if (!name) return res.status(400).json({ error: 'Business name is required' });
-  const d = store.orgDefaults();
-  const org = { id: store.id('org'), name, profile: d.profile, branding: d.branding, defaults: d.defaults, numbering: d.numbering, ...store.envelope() };
-  org.profile.businessName = name;
-  if (Array.isArray(req.body.addressLines)) org.profile.addressLines = req.body.addressLines;
-  if (req.body.gstin != null) org.profile.taxId = req.body.gstin;
-  if (req.body.currency) org.defaults.currency = req.body.currency;
-  if (req.body.invoicePrefix) org.numbering.invoicePrefix = req.body.invoicePrefix;
-  if (req.body.nextNumber != null) org.numbering.nextNumber = Number(req.body.nextNumber) || 1;
-  if (req.body.defaultTerms) org.defaults.terms = req.body.defaultTerms;
-  if (req.body.defaultTaxLabel) org.defaults.taxLabel = req.body.defaultTaxLabel;
-  if (req.body.defaultNotes != null) org.defaults.notes = req.body.defaultNotes;
-  db.organizations.push(org);
-  db.meta.currentOrgId = org.id; // a freshly created org becomes the active one
-  store.save();
-  res.json(orgSummary(org));
-});
+  const org = await db.orgs.create({
+    name, businessName: name,
+    addressLines: Array.isArray(req.body.addressLines) ? req.body.addressLines : [],
+    taxId: req.body.gstin != null ? req.body.gstin : '',
+    currency: req.body.currency, invoicePrefix: req.body.invoicePrefix,
+    nextNumber: req.body.nextNumber != null ? Number(req.body.nextNumber) || 1 : 1,
+    terms: req.body.defaultTerms, taxLabel: req.body.defaultTaxLabel,
+    notes: req.body.defaultNotes != null ? req.body.defaultNotes : '',
+  });
+  await db.appState.setCurrentOrg(org.id); // a freshly created org becomes active
+  res.json(await orgSummary(org));
+}));
 
-app.post('/api/orgs/:id/activate', (req, res) => {
-  const db = store.get();
-  const org = db.organizations.find((o) => o.id === req.params.id && !o.archivedAt);
-  if (!org) return res.status(404).json({ error: 'Organization not found' });
-  db.meta.currentOrgId = org.id;
-  store.save();
-  res.json({ currentOrgId: db.meta.currentOrgId });
-});
+app.post('/api/orgs/:id/activate', route(async (req, res) => {
+  const org = await db.orgs.byId(req.params.id);
+  if (!org || org.archivedAt) return res.status(404).json({ error: 'Organization not found' });
+  await db.appState.setCurrentOrg(org.id);
+  res.json({ currentOrgId: org.id });
+}));
 
-app.delete('/api/orgs/:id', (req, res) => {
-  const db = store.get();
-  const org = db.organizations.find((o) => o.id === req.params.id);
+app.delete('/api/orgs/:id', route(async (req, res) => {
+  const org = await db.orgs.byId(req.params.id);
   if (!org) return res.status(404).json({ error: 'Organization not found' });
-  org.archivedAt = now(); // soft delete — data is recoverable
-  if (db.meta.currentOrgId === org.id) {
-    const next = db.organizations.find((o) => !o.archivedAt);
-    db.meta.currentOrgId = next ? next.id : null;
+  await db.orgs.archive(org.id); // soft delete — data is recoverable
+  const current = await db.appState.currentOrgId();
+  if (current === org.id) {
+    const next = (await db.orgs.listActive())[0];
+    await db.appState.setCurrentOrg(next ? next.id : null);
   }
-  store.save();
-  res.json({ ok: true, currentOrgId: db.meta.currentOrgId });
-});
+  res.json({ ok: true, currentOrgId: await db.appState.currentOrgId() });
+}));
 
 // ─────────────────────────────────────────────────────────────
 // Settings (active org config, flat shape)
 // ─────────────────────────────────────────────────────────────
-app.get('/api/settings', (req, res) => {
-  const org = requireOrg(res); if (!org) return;
+app.get('/api/settings', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
   res.json(settingsView(org));
-});
+}));
 
-app.put('/api/settings', (req, res) => {
-  const org = requireOrg(res); if (!org) return;
-  applySettings(org, req.body);
-  store.save();
-  res.json(settingsView(org));
-});
+app.put('/api/settings', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
+  await applySettings(org, req.body);
+  const saved = await db.orgs.save(org);
+  res.json(settingsView(saved));
+}));
 
 // ─────────────────────────────────────────────────────────────
 // Customers
 // ─────────────────────────────────────────────────────────────
-app.get('/api/customers', (req, res) => {
-  const org = requireOrg(res); if (!org) return;
-  res.json(store.rows('customers', org.id).map(customerView));
-});
+app.get('/api/customers', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
+  res.json((await db.customers.list(org.id)).map(customerView));
+}));
 
-app.post('/api/customers', (req, res) => {
-  const org = requireOrg(res); if (!org) return;
-  const c = {
-    id: store.id('cust'), orgId: org.id,
-    name: req.body.name || 'Untitled customer', email: req.body.email || '', ccEmail: req.body.ccEmail || '',
-    taxId: req.body.gstin || '',
-    billingAddress: { lines: req.body.billingAddressLines || [] },
-    shippingAddress: { lines: req.body.shipToAddressLines || [] },
-    contacts: [], ...store.envelope(),
-  };
-  store.get().customers.push(c);
-  store.save();
+app.post('/api/customers', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
+  const c = await db.customers.create(org.id, {
+    name: req.body.name, email: req.body.email, ccEmail: req.body.ccEmail, taxId: req.body.gstin,
+    billingAddressLines: req.body.billingAddressLines, shipToAddressLines: req.body.shipToAddressLines,
+  });
   res.json(customerView(c));
-});
+}));
 
-app.put('/api/customers/:id', (req, res) => {
-  const org = requireOrg(res); if (!org) return;
-  const c = store.rows('customers', org.id).find((x) => x.id === req.params.id);
-  if (!c) return res.status(404).json({ error: 'Customer not found' });
+app.put('/api/customers/:id', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
   const b = req.body;
-  if (b.name !== undefined) c.name = b.name;
-  if (b.email !== undefined) c.email = b.email;
-  if (b.ccEmail !== undefined) c.ccEmail = b.ccEmail;
-  if (b.gstin !== undefined) c.taxId = b.gstin;
-  if (b.billingAddressLines !== undefined) c.billingAddress.lines = b.billingAddressLines;
-  if (b.shipToAddressLines !== undefined) c.shippingAddress.lines = b.shipToAddressLines;
-  c.updatedAt = now();
-  store.save();
+  const c = await db.customers.update(org.id, req.params.id, {
+    name: b.name, email: b.email, ccEmail: b.ccEmail, taxId: b.gstin,
+    billingAddressLines: b.billingAddressLines, shipToAddressLines: b.shipToAddressLines,
+  });
+  if (!c) return res.status(404).json({ error: 'Customer not found' });
   res.json(customerView(c));
-});
+}));
 
-app.delete('/api/customers/:id', (req, res) => {
-  const org = requireOrg(res); if (!org) return;
-  const c = store.rows('customers', org.id).find((x) => x.id === req.params.id);
-  if (c) { c.archivedAt = now(); store.save(); }
+app.delete('/api/customers/:id', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
+  await db.customers.archive(org.id, req.params.id);
   res.json({ ok: true });
-});
+}));
 
 // ─────────────────────────────────────────────────────────────
 // Items catalog (API path kept as /products)
 // ─────────────────────────────────────────────────────────────
-app.get('/api/products', (req, res) => {
-  const org = requireOrg(res); if (!org) return;
-  res.json(store.rows('items', org.id).map(itemView));
-});
+app.get('/api/products', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
+  res.json((await db.items.list(org.id)).map(itemView));
+}));
 
-app.post('/api/products', (req, res) => {
-  const org = requireOrg(res); if (!org) return;
+app.post('/api/products', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
   const name = (req.body.name || '').trim();
   if (!name) return res.status(400).json({ error: 'Item name required' });
   // De-dupe by name (case-insensitive): update the existing one instead.
-  const existing = store.rows('items', org.id).find((p) => p.name.toLowerCase() === name.toLowerCase());
+  const existing = await db.items.byName(org.id, name);
   if (existing) {
-    existing.defaultRate = Number(req.body.rate) || 0;
-    existing.defaultTaxPercent = Number(req.body.taxPct) || 0;
-    existing.updatedAt = now();
-    store.save();
-    return res.json(itemView(existing));
+    const updated = await db.items.update(org.id, existing.id, { rate: req.body.rate, taxPct: req.body.taxPct });
+    return res.json(itemView(updated));
   }
-  const p = { id: store.id('item'), orgId: org.id, name, defaultRate: Number(req.body.rate) || 0, defaultTaxPercent: Number(req.body.taxPct) || 0, taxRateId: null, ...store.envelope() };
-  store.get().items.push(p);
-  store.save();
-  res.json(itemView(p));
-});
+  res.json(itemView(await db.items.create(org.id, { name, rate: req.body.rate, taxPct: req.body.taxPct })));
+}));
 
-app.put('/api/products/:id', (req, res) => {
-  const org = requireOrg(res); if (!org) return;
-  const p = store.rows('items', org.id).find((x) => x.id === req.params.id);
+app.put('/api/products/:id', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
+  const p = await db.items.update(org.id, req.params.id, { name: req.body.name, rate: req.body.rate, taxPct: req.body.taxPct });
   if (!p) return res.status(404).json({ error: 'Item not found' });
-  if (req.body.name !== undefined) p.name = req.body.name;
-  if (req.body.rate !== undefined) p.defaultRate = Number(req.body.rate) || 0;
-  if (req.body.taxPct !== undefined) p.defaultTaxPercent = Number(req.body.taxPct) || 0;
-  p.updatedAt = now();
-  store.save();
   res.json(itemView(p));
-});
+}));
 
-app.delete('/api/products/:id', (req, res) => {
-  const org = requireOrg(res); if (!org) return;
-  const p = store.rows('items', org.id).find((x) => x.id === req.params.id);
-  if (p) { p.archivedAt = now(); store.save(); }
+app.delete('/api/products/:id', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
+  await db.items.archive(org.id, req.params.id);
   res.json({ ok: true });
-});
+}));
 
 // ─────────────────────────────────────────────────────────────
 // Invoices
 // ─────────────────────────────────────────────────────────────
-function findInvoice(org, id) { return store.rows('invoices', org.id).find((i) => i.id === id); }
+app.get('/api/invoices', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
+  res.json((await db.invoices.list(org.id)).map(invoiceView));
+}));
 
-app.get('/api/invoices', (req, res) => {
-  const org = requireOrg(res); if (!org) return;
-  const db = store.get();
-  const list = store.rows('invoices', org.id)
-    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
-    .map((inv) => invoiceView(db, inv));
-  res.json(list);
-});
-
-app.get('/api/invoices/:id', (req, res) => {
-  const org = requireOrg(res); if (!org) return;
-  const inv = findInvoice(org, req.params.id);
+app.get('/api/invoices/:id', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
+  const inv = await db.invoices.byId(org.id, req.params.id);
   if (!inv) return res.status(404).json({ error: 'Invoice not found' });
-  res.json(invoiceView(store.get(), inv));
-});
+  res.json(invoiceView(inv));
+}));
 
-app.post('/api/invoices', async (req, res) => {
-  const org = requireOrg(res); if (!org) return;
-  const db = store.get();
+app.post('/api/invoices', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
   try {
-    const number = nextInvoiceNumber(org);
-    const inv = buildStoredInvoice(org, req.body, number);
-    db.invoices.push(inv);
-    logActivity(db, org.id, 'invoice.created', 'invoice', inv.id, `Created ${inv.number}`);
-    await saveInvoicePdf(db, org, inv);
-    store.save();
-    res.json(invoiceView(db, inv));
+    // Numbering + insert + activity commit together, so a failure can't burn an
+    // invoice number or leave an invoice without its line items.
+    const inv = await db.tx(async (client) => {
+      const number = await db.orgs.nextInvoiceNumber(org.id, client);
+      const rec = await buildStoredInvoice(org, req.body, number);
+      const stored = { ...rec, snapshot: snapshotForStorage(rec.snapshot) };
+      await db.invoices.create(stored, client);
+      await db.activity.log(org.id, 'invoice.created', 'invoice', rec.id, `Created ${rec.number}`, client);
+      return rec;
+    });
+    await saveInvoicePdf(org, inv);
+    res.json(invoiceView(inv));
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
-});
+}));
 
-app.put('/api/invoices/:id', async (req, res) => {
-  const org = requireOrg(res); if (!org) return;
-  const db = store.get();
-  const inv = findInvoice(org, req.params.id);
+app.put('/api/invoices/:id', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
+  const inv = await db.invoices.byId(org.id, req.params.id);
   if (!inv) return res.status(404).json({ error: 'Invoice not found' });
-  if (invoiceView(db, inv).status === 'paid') return res.status(400).json({ error: 'Paid invoices cannot be edited' });
+  if (invoiceView(inv).status === 'paid') return res.status(400).json({ error: 'Paid invoices cannot be edited' });
 
+  let lineItems = null;
+  let amounts = null;
   if (req.body.items) {
-    inv.lineItems = req.body.items.map(lineItemFromApi);
-    inv.amounts = computeTotals(inv.lineItems.map(lineItemToApi));
+    lineItems = req.body.items.map(lineItemFromApi);
+    amounts = computeTotals(lineItems.map(lineItemToApi));
   }
+  const patch = {};
   for (const k of ['invoiceDate', 'dueDate', 'terms', 'taxLabel', 'notes'])
-    if (req.body[k] !== undefined) inv[k] = req.body[k];
-  inv.updatedAt = now();
-  await saveInvoicePdf(db, org, inv);
-  store.save();
-  res.json(invoiceView(db, inv));
-});
+    if (req.body[k] !== undefined) patch[k] = req.body[k];
 
-app.delete('/api/invoices/:id', (req, res) => {
-  const org = requireOrg(res); if (!org) return;
-  const inv = findInvoice(org, req.params.id);
-  if (inv) { inv.archivedAt = now(); store.save(); }
+  await db.invoices.update(org.id, inv.id, patch, lineItems, amounts);
+  const fresh = await db.invoices.byId(org.id, inv.id);
+  await saveInvoicePdf(org, fresh);
+  res.json(invoiceView(await db.invoices.byId(org.id, inv.id)));
+}));
+
+app.delete('/api/invoices/:id', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
+  await db.invoices.archive(org.id, req.params.id);
   res.json({ ok: true });
-});
+}));
 
 // Mark paid → append a payment to the ledger (supports partial/multiple).
-app.post('/api/invoices/:id/pay', async (req, res) => {
-  const org = requireOrg(res); if (!org) return;
-  const db = store.get();
-  const inv = findInvoice(org, req.params.id);
+app.post('/api/invoices/:id/pay', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
+  const inv = await db.invoices.byId(org.id, req.params.id);
   if (!inv) return res.status(404).json({ error: 'Invoice not found' });
-  const payment = {
-    id: store.id('pay'), orgId: org.id, invoiceId: inv.id,
+
+  const payment = await db.payments.add(org.id, inv.id, {
     amount: req.body.amount != null ? round2(req.body.amount) : inv.amounts.total,
     currency: inv.currency, mode: req.body.mode || 'Bank Transfer',
     date: req.body.date || now().slice(0, 10), reference: req.body.reference || '', note: '',
-    ...store.envelope(),
-  };
-  db.payments.push(payment);
-  inv.updatedAt = now();
-  logActivity(db, org.id, 'invoice.payment', 'invoice', inv.id, `Recorded ${payment.currency}${payment.amount} via ${payment.mode}`);
-  await saveInvoicePdf(db, org, inv);
-  store.save();
-  res.json(invoiceView(db, inv));
-});
+  });
+  await db.invoices.touch(inv.id);
+  await db.activity.log(org.id, 'invoice.payment', 'invoice', inv.id, `Recorded ${payment.currency}${payment.amount} via ${payment.mode}`);
+
+  const updated = await db.invoices.byId(org.id, inv.id);
+  // Fully paid → no further reminders should go out.
+  if (invoiceView(updated).status === 'paid') {
+    const n = await db.reminders.cancelPendingFor(inv.id);
+    if (n) await db.activity.log(org.id, 'reminder.cancelled', 'invoice', inv.id, `Cancelled ${n} pending reminder(s) for ${inv.number}`);
+  }
+  await saveInvoicePdf(org, updated);
+  res.json(invoiceView(await db.invoices.byId(org.id, inv.id)));
+}));
 
 // Undo payment(s) → archive the ledger entries for this invoice.
-app.post('/api/invoices/:id/unpay', async (req, res) => {
-  const org = requireOrg(res); if (!org) return;
-  const db = store.get();
-  const inv = findInvoice(org, req.params.id);
+app.post('/api/invoices/:id/unpay', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
+  const inv = await db.invoices.byId(org.id, req.params.id);
   if (!inv) return res.status(404).json({ error: 'Invoice not found' });
-  for (const p of paymentsForInvoice(db, inv.id)) { p.archivedAt = now(); p.updatedAt = now(); }
-  inv.updatedAt = now();
-  await saveInvoicePdf(db, org, inv);
-  store.save();
-  res.json(invoiceView(db, inv));
-});
+  await db.payments.archiveForInvoice(inv.id);
+  await db.invoices.touch(inv.id);
+  const updated = await db.invoices.byId(org.id, inv.id);
+  await saveInvoicePdf(org, updated);
+  res.json(invoiceView(await db.invoices.byId(org.id, inv.id)));
+}));
 
 // List the ledger entries behind an invoice.
-app.get('/api/invoices/:id/payments', (req, res) => {
-  const org = requireOrg(res); if (!org) return;
-  const inv = findInvoice(org, req.params.id);
+app.get('/api/invoices/:id/payments', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
+  const inv = await db.invoices.byId(org.id, req.params.id);
   if (!inv) return res.status(404).json({ error: 'Invoice not found' });
-  res.json(paymentsForInvoice(store.get(), inv.id));
-});
+  res.json(await db.payments.forInvoice(inv.id));
+}));
 
 // Stream the stored PDF (regenerating if needed). ?download=1 forces attachment.
-app.get('/api/invoices/:id/pdf', async (req, res) => {
-  const org = requireOrg(res); if (!org) return;
-  const db = store.get();
-  const inv = findInvoice(org, req.params.id);
+app.get('/api/invoices/:id/pdf', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
+  const inv = await db.invoices.byId(org.id, req.params.id);
   if (!inv) return res.status(404).json({ error: 'Invoice not found' });
   try {
-    const buf = await getInvoicePdf(db, org, inv);
+    const buf = await getInvoicePdf(org, inv);
     res.setHeader('Content-Type', 'application/pdf');
     const disp = req.query.download ? 'attachment' : 'inline';
     res.setHeader('Content-Disposition', `${disp}; filename="${inv.number}.pdf"`);
@@ -469,110 +462,168 @@ app.get('/api/invoices/:id/pdf', async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
-});
+}));
 
-// Send invoice via Gmail (attaches the locally-stored vector PDF).
-app.post('/api/invoices/:id/send', async (req, res) => {
-  const org = requireOrg(res); if (!org) return;
-  const db = store.get();
-  const inv = findInvoice(org, req.params.id);
+// Default email content for the send dialog (subject/body + org default reminders).
+app.get('/api/invoices/:id/email-defaults', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
+  const inv = await db.invoices.byId(org.id, req.params.id);
+  if (!inv) return res.status(404).json({ error: 'Invoice not found' });
+  const tpl = emailTemplates.invoiceEmail(org, invoiceView(inv));
+  res.json({ subject: tpl.subject, message: tpl.text, reminderOffsets: org.defaults.reminderOffsets || [0] });
+}));
+
+// Send invoice via Gmail (attaches the stored vector PDF).
+app.post('/api/invoices/:id/send', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
+  const inv = await db.invoices.byId(org.id, req.params.id);
   if (!inv) return res.status(404).json({ error: 'Invoice not found' });
   try {
-    const view = invoiceView(db, inv);
+    const view = invoiceView(inv);
     const to = req.body.to || view.recipientEmail;
     if (!to) return res.status(400).json({ error: 'No recipient email set for this customer.' });
-    const subject = req.body.subject || `Invoice ${inv.number} from ${org.profile.businessName}`;
-    const cur = inv.currency || '$';
-    const text =
-      req.body.message ||
-      `Dear ${view.billTo.name},\n\nPlease find attached invoice ${inv.number} for ${cur}${view.total.toFixed(2)}.\nDue date: ${inv.dueDate}.\n\nThank you,\n${org.profile.businessName}`;
-    const html = text.replace(/\n/g, '<br>');
 
-    const pdfBuf = req.body.pdfBase64 ? Buffer.from(req.body.pdfBase64, 'base64') : await getInvoicePdf(db, org, inv);
+    const tpl = emailTemplates.invoiceEmail(org, view);
+    const subject = req.body.subject || tpl.subject;
+    const text = req.body.message || tpl.text;
+    // Untouched default message → full styled template; edited → branded plain rendering.
+    const html = text === tpl.text ? tpl.html : emailTemplates.plainHtml(text);
+
+    const pdfBuf = req.body.pdfBase64 ? Buffer.from(req.body.pdfBase64, 'base64') : await getInvoicePdf(org, inv);
 
     const result = await google.sendInvoiceEmail({
       to, cc: req.body.cc, subject, text, html,
       pdfBase64: pdfBuf.toString('base64'), attachmentName: `${inv.number}.pdf`,
+      fromName: org.profile.businessName,
     });
 
-    inv.sentAt = now();
-    inv.sentTo = to;
-    inv.updatedAt = now();
-    logActivity(db, org.id, 'invoice.sent', 'invoice', inv.id, `Sent ${inv.number} to ${to}`);
-    store.save();
-    res.json({ ok: true, ...result, invoice: invoiceView(db, inv) });
+    await db.invoices.markSent(inv.id, to);
+    await db.activity.log(org.id, 'invoice.sent', 'invoice', inv.id, `Sent ${inv.number} to ${to}`);
+
+    const offsets = Array.isArray(req.body.reminderOffsets) ? req.body.reminderOffsets : org.defaults.reminderOffsets || [0];
+    const created = await createReminders(org, inv, offsets);
+    if (created.length)
+      await db.activity.log(org.id, 'reminder.scheduled', 'invoice', inv.id, `Scheduled ${created.length} reminder(s) for ${inv.number}`);
+
+    res.json({
+      ok: true, ...result,
+      invoice: invoiceView(await db.invoices.byId(org.id, inv.id)),
+      reminders: (await db.reminders.forInvoice(inv.id)).map(reminderView),
+    });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
-});
+}));
+
+// ─────────────────────────────────────────────────────────────
+// Payment reminders (sent by the hourly scheduler via Gmail)
+// ─────────────────────────────────────────────────────────────
+function sanitizeOffsets(list) {
+  const offs = (Array.isArray(list) ? list : []).map(Number).filter(Number.isFinite).map(Math.trunc);
+  return [...new Set(offs)].sort((a, b) => a - b);
+}
+
+function reminderView(r) {
+  return {
+    id: r.id, invoiceId: r.invoiceId, offsetDays: r.offsetDays, dueOn: r.dueOn,
+    status: r.status, sentAt: r.sentAt, sentTo: r.sentTo, error: r.error || null, createdAt: r.createdAt,
+  };
+}
+
+// offsetDays: negative = before due date, 0 = on it, positive = after.
+// Skips offsets whose date is already past; the partial unique index in the
+// schema rejects a duplicate pending date, which surfaces as a null insert.
+async function createReminders(org, inv, offsets) {
+  const today = now().slice(0, 10);
+  const created = [];
+  for (const offsetDays of sanitizeOffsets(offsets)) {
+    const dueOn = addDays(inv.dueDate, offsetDays);
+    if (dueOn < today) continue;
+    const rem = await db.reminders.create(org.id, inv.id, offsetDays, dueOn);
+    if (rem) created.push(rem);
+  }
+  return created;
+}
+
+app.get('/api/invoices/:id/reminders', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
+  const inv = await db.invoices.byId(org.id, req.params.id);
+  if (!inv) return res.status(404).json({ error: 'Invoice not found' });
+  res.json((await db.reminders.forInvoice(inv.id)).map(reminderView));
+}));
+
+app.post('/api/invoices/:id/reminders', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
+  const inv = await db.invoices.byId(org.id, req.params.id);
+  if (!inv) return res.status(404).json({ error: 'Invoice not found' });
+  const created = await createReminders(org, inv, [req.body.offsetDays]);
+  if (!created.length) return res.status(400).json({ error: 'Reminder date is in the past or already scheduled.' });
+  await db.activity.log(org.id, 'reminder.scheduled', 'invoice', inv.id, `Scheduled reminder for ${inv.number} on ${created[0].dueOn}`);
+  res.json((await db.reminders.forInvoice(inv.id)).map(reminderView));
+}));
+
+app.delete('/api/reminders/:id', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
+  const rem = await db.reminders.byId(org.id, req.params.id);
+  if (!rem) return res.status(404).json({ error: 'Reminder not found' });
+  if (rem.status === 'pending') await db.reminders.cancel(rem.id);
+  res.json((await db.reminders.forInvoice(rem.invoiceId)).map(reminderView));
+}));
 
 // ─────────────────────────────────────────────────────────────
 // Recurring schedules
 // ─────────────────────────────────────────────────────────────
-app.get('/api/recurring', (req, res) => {
-  const org = requireOrg(res); if (!org) return;
-  res.json(store.rows('recurringSchedules', org.id).map(recurringView));
-});
+app.get('/api/recurring', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
+  res.json((await db.recurring.list(org.id)).map(recurringView));
+}));
 
-app.post('/api/recurring', (req, res) => {
-  const org = requireOrg(res); if (!org) return;
-  const r = {
-    id: store.id('rec'), orgId: org.id, customerId: req.body.customerId, active: req.body.active !== false,
-    frequency: { unit: 'month', interval: 1, dayOfMonth: Number(req.body.dayOfMonth) || 1 },
-    nextRunDate: req.body.nextRunDate || nextMonthlyDate(Number(req.body.dayOfMonth) || 1), lastGeneratedAt: null,
-    template: {
-      terms: req.body.terms || org.defaults.terms, taxLabel: req.body.taxLabel || org.defaults.taxLabel,
-      notes: req.body.notes != null ? req.body.notes : org.defaults.notes,
-      lineItems: (req.body.items || []).map(lineItemFromApi),
-    },
-    autoSend: Boolean(req.body.autoSend), ...store.envelope(),
-  };
-  store.get().recurringSchedules.push(r);
-  store.save();
+app.post('/api/recurring', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
+  const r = await db.recurring.create(org.id, {
+    customerId: req.body.customerId, active: req.body.active,
+    dayOfMonth: Number(req.body.dayOfMonth) || 1,
+    nextRunDate: req.body.nextRunDate || nextMonthlyDate(Number(req.body.dayOfMonth) || 1),
+    terms: req.body.terms || org.defaults.terms,
+    taxLabel: req.body.taxLabel || org.defaults.taxLabel,
+    notes: req.body.notes != null ? req.body.notes : org.defaults.notes,
+    autoSend: req.body.autoSend,
+  }, (req.body.items || []).map(lineItemFromApi));
   res.json(recurringView(r));
-});
+}));
 
-app.put('/api/recurring/:id', (req, res) => {
-  const org = requireOrg(res); if (!org) return;
-  const r = store.rows('recurringSchedules', org.id).find((x) => x.id === req.params.id);
-  if (!r) return res.status(404).json({ error: 'Schedule not found' });
+app.put('/api/recurring/:id', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
+  const existing = await db.recurring.byId(org.id, req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Schedule not found' });
   const b = req.body;
-  if (b.active !== undefined) r.active = b.active;
-  if (b.dayOfMonth !== undefined) r.frequency.dayOfMonth = Number(b.dayOfMonth) || 1;
-  if (b.nextRunDate !== undefined) r.nextRunDate = b.nextRunDate;
-  if (b.customerId !== undefined) r.customerId = b.customerId;
-  if (b.terms !== undefined) r.template.terms = b.terms;
-  if (b.taxLabel !== undefined) r.template.taxLabel = b.taxLabel;
-  if (b.notes !== undefined) r.template.notes = b.notes;
-  if (b.items !== undefined) r.template.lineItems = b.items.map(lineItemFromApi);
-  if (b.autoSend !== undefined) r.autoSend = b.autoSend;
-  r.updatedAt = now();
-  store.save();
+  const r = await db.recurring.update(org.id, req.params.id, {
+    active: b.active, dayOfMonth: b.dayOfMonth === undefined ? undefined : Number(b.dayOfMonth) || 1,
+    nextRunDate: b.nextRunDate, customerId: b.customerId, terms: b.terms, taxLabel: b.taxLabel,
+    notes: b.notes, autoSend: b.autoSend,
+  }, b.items !== undefined ? b.items.map(lineItemFromApi) : null);
   res.json(recurringView(r));
-});
+}));
 
-app.delete('/api/recurring/:id', (req, res) => {
-  const org = requireOrg(res); if (!org) return;
-  const r = store.rows('recurringSchedules', org.id).find((x) => x.id === req.params.id);
-  if (r) { r.archivedAt = now(); store.save(); }
+app.delete('/api/recurring/:id', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
+  await db.recurring.archive(org.id, req.params.id);
   res.json({ ok: true });
-});
+}));
 
 // Generate the invoice for a schedule right now (also used by the scheduler).
-app.post('/api/recurring/:id/run', async (req, res) => {
-  const org = requireOrg(res); if (!org) return;
-  const db = store.get();
-  const r = store.rows('recurringSchedules', org.id).find((x) => x.id === req.params.id);
+app.post('/api/recurring/:id/run', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
+  const r = await db.recurring.byId(org.id, req.params.id);
   if (!r) return res.status(404).json({ error: 'Schedule not found' });
   try {
-    const inv = generateFromSchedule(db, org, r);
-    await saveInvoicePdf(db, org, inv);
-    store.save();
-    res.json(invoiceView(db, inv));
+    const inv = await generateFromSchedule(org, r);
+    await saveInvoicePdf(org, inv);
+    res.json(invoiceView(inv));
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
-});
+}));
 
 function nextMonthlyDate(dayOfMonth) {
   const d0 = new Date();
@@ -593,46 +644,102 @@ function bumpMonth(dateStr, dayOfMonth) {
   return next.toISOString().slice(0, 10);
 }
 
-function generateFromSchedule(db, org, r) {
+// Mint an invoice from a schedule and advance its next run date — atomically, so
+// a mid-run failure can't generate an invoice without moving the schedule on
+// (which would duplicate it next pass) or vice versa.
+async function generateFromSchedule(org, r) {
   const invoiceDate = r.nextRunDate || now().slice(0, 10);
-  const number = nextInvoiceNumber(org);
-  const body = {
-    customerId: r.customerId, invoiceDate, terms: r.template.terms,
-    dueDate: addDays(invoiceDate, termsToDays(r.template.terms)), taxLabel: r.template.taxLabel,
-    items: r.template.lineItems.map(lineItemToApi), notes: r.template.notes, recurringId: r.id,
-  };
-  const inv = buildStoredInvoice(org, body, number);
-  db.invoices.push(inv);
-  r.lastGeneratedAt = now();
-  r.nextRunDate = bumpMonth(invoiceDate, r.frequency.dayOfMonth);
-  r.updatedAt = now();
-  logActivity(db, org.id, 'invoice.created', 'invoice', inv.id, `Recurring generated ${inv.number}`);
-  return inv;
+  return db.tx(async (client) => {
+    const number = await db.orgs.nextInvoiceNumber(org.id, client);
+    const body = {
+      customerId: r.customerId, invoiceDate, terms: r.template.terms,
+      dueDate: addDays(invoiceDate, termsToDays(r.template.terms)), taxLabel: r.template.taxLabel,
+      items: r.template.lineItems.map(lineItemToApi), notes: r.template.notes, recurringId: r.id,
+    };
+    const rec = await buildStoredInvoice(org, body, number);
+    await db.invoices.create({ ...rec, snapshot: snapshotForStorage(rec.snapshot) }, client);
+    await db.recurring.advance(r.id, bumpMonth(invoiceDate, r.frequency.dayOfMonth), client);
+    await db.activity.log(org.id, 'invoice.created', 'invoice', rec.id, `Recurring generated ${rec.number}`, client);
+    return rec;
+  });
 }
 
 // Scheduler: every hour, materialize any schedule (across all orgs) whose nextRunDate has arrived.
 async function runDueSchedules() {
-  const db = store.get();
   const today = now().slice(0, 10);
-  let changed = false;
-  for (const org of db.organizations.filter((o) => !o.archivedAt)) {
-    for (const r of store.rows('recurringSchedules', org.id)) {
-      if (!r.active) continue;
+  try {
+    const due = await db.recurring.due(today);
+    for (const r of due) {
+      const org = await db.orgs.byId(r.orgId);
+      if (!org || org.archivedAt) continue;
       let guard = 0;
-      while (r.nextRunDate && r.nextRunDate <= today && guard < 36) {
+      let schedule = r;
+      // Catch-up loop for server downtime, capped like the original.
+      while (schedule.nextRunDate && schedule.nextRunDate <= today && guard < 36) {
         try {
-          const inv = generateFromSchedule(db, org, r);
-          await saveInvoicePdf(db, org, inv);
-          changed = true;
+          const inv = await generateFromSchedule(org, schedule);
+          await saveInvoicePdf(org, inv);
         } catch (e) {
-          console.error('Recurring generation failed for', r.id, e.message);
+          console.error('Recurring generation failed for', schedule.id, e.message);
           break;
         }
+        schedule = await db.recurring.byId(org.id, schedule.id);
+        if (!schedule) break;
         guard++;
       }
     }
+  } catch (e) {
+    console.error('runDueSchedules failed:', e.message);
   }
-  if (changed) store.save();
+}
+
+// Days between two YYYY-MM-DD dates.
+function diffDays(fromDate, toDate) {
+  return Math.round((new Date(toDate + 'T00:00:00Z') - new Date(fromDate + 'T00:00:00Z')) / 86400000);
+}
+
+// Scheduler: send due payment reminders via Gmail.
+async function runDueReminders() {
+  if (!google.status().connected) return; // reminders stay pending until Gmail is connected
+  const today = now().slice(0, 10);
+  try {
+    for (const rem of await db.reminders.due(today)) {
+      const inv = await db.invoices.byIdAnyOrg(rem.invoiceId);
+      const view = inv && !inv.voidedAt ? invoiceView(inv) : null;
+      if (!view || view.status === 'paid') {
+        await db.reminders.cancel(rem.id);
+        continue;
+      }
+      const org = await db.orgs.byId(rem.orgId);
+      if (!org || org.archivedAt) continue;
+
+      const to = view.recipientEmail || inv.sentTo;
+      if (!to) {
+        await db.reminders.markError(rem.id, 'No recipient email set for this customer.');
+        continue;
+      }
+      try {
+        // Tone uses actual lateness today (not the planned offset) so catch-up
+        // sends after downtime still read correctly.
+        const tpl = emailTemplates.reminderEmail(org, view, diffDays(inv.dueDate, today));
+        const customer = await db.customers.byId(org.id, inv.customerId);
+        const pdfBuf = await getInvoicePdf(org, inv);
+        await google.sendInvoiceEmail({
+          to, cc: (customer && customer.ccEmail) || undefined,
+          subject: tpl.subject, text: tpl.text, html: tpl.html,
+          pdfBase64: pdfBuf.toString('base64'), attachmentName: `${inv.number}.pdf`,
+          fromName: org.profile.businessName,
+        });
+        await db.reminders.markSent(rem.id, to);
+        await db.activity.log(org.id, 'reminder.sent', 'invoice', inv.id, `Payment reminder sent for ${inv.number} to ${to}`);
+      } catch (e) {
+        console.error('Reminder send failed for', rem.id, e.message);
+        await db.reminders.markError(rem.id, e.message); // retried on the next hourly pass
+      }
+    }
+  } catch (e) {
+    console.error('runDueReminders failed:', e.message);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -654,16 +761,17 @@ function filterInvoices(rows, { from, to, status, customerId }) {
   });
 }
 
-app.get('/api/export', async (req, res) => {
-  const org = requireOrg(res); if (!org) return;
-  const db = store.get();
+app.get('/api/export', route(async (req, res) => {
+  const org = await requireOrg(res); if (!org) return;
   const datasets = String(req.query.datasets || 'invoices,customers,items').split(',').map((s) => s.trim()).filter(Boolean);
   const filters = { from: req.query.from || '', to: req.query.to || '', status: req.query.status || 'all', customerId: req.query.customerId || '' };
   try {
-    let invoices = store.rows('invoices', org.id).sort((a, b) => (a.invoiceDate < b.invoiceDate ? 1 : -1)).map((i) => invoiceView(db, i));
+    let invoices = (await db.invoices.list(org.id))
+      .sort((a, b) => (a.invoiceDate < b.invoiceDate ? 1 : -1))
+      .map(invoiceView);
     invoices = filterInvoices(invoices, filters);
-    const customers = store.rows('customers', org.id).map(customerView);
-    const items = store.rows('items', org.id).map(itemView);
+    const customers = (await db.customers.list(org.id)).map(customerView);
+    const items = (await db.items.list(org.id)).map(itemView);
     const settings = settingsView(org);
     const buf = await buildWorkbook({ datasets, invoices, customers, items, settings });
     const safeName = (settings.businessName || 'export').replace(/[^a-zA-Z0-9._-]+/g, '-');
@@ -674,7 +782,7 @@ app.get('/api/export', async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
-});
+}));
 
 // ─────────────────────────────────────────────────────────────
 // Google auth (global — one Gmail account sends for the active org)
@@ -687,7 +795,7 @@ app.get('/auth/google', (req, res) => {
   res.redirect(google.authUrl());
 });
 
-app.get('/auth/google/callback', async (req, res) => {
+app.get('/auth/google/callback', route(async (req, res) => {
   try {
     if (req.query.error) throw new Error(req.query.error);
     await google.handleCallback(req.query.code);
@@ -699,12 +807,12 @@ app.get('/auth/google/callback', async (req, res) => {
   } catch (e) {
     res.status(400).send('Google connection failed: ' + e.message);
   }
-});
+}));
 
-app.post('/api/google/disconnect', (req, res) => {
-  google.disconnect();
+app.post('/api/google/disconnect', route(async (req, res) => {
+  await google.disconnect();
   res.json({ ok: true });
-});
+}));
 
 // ─────────────────────────────────────────────────────────────
 // Static frontend
@@ -713,8 +821,29 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'index.html')));
 
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => {
-  console.log(`Invoicing tool running at http://localhost:${PORT}`);
-  runDueSchedules();
-  setInterval(runDueSchedules, 60 * 60 * 1000); // hourly
-});
+
+// Verify the database and Storage are reachable before accepting traffic — a bad
+// DATABASE_URL should fail loudly at boot, not on the first request.
+async function start() {
+  try {
+    const info = await db.connect();
+    console.log(`Connected to Postgres (${info.db})`);
+  } catch (e) {
+    console.error('Could not connect to the database:', e.message);
+    console.error('Check DATABASE_URL in .env');
+    process.exit(1);
+  }
+  if (storage.isLocal()) {
+    console.warn('Supabase Storage not configured — using local filesystem for PDFs and logos.');
+  }
+  await storage.ensureBucket();
+  await google.load();
+
+  app.listen(PORT, () => {
+    console.log(`Invoicing tool running at http://localhost:${PORT}`);
+    runDueSchedules().then(runDueReminders);
+    setInterval(() => runDueSchedules().then(runDueReminders), 60 * 60 * 1000); // hourly
+  });
+}
+
+start();

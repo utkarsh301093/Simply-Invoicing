@@ -472,6 +472,7 @@ function InvoiceDetail({ id, settings, gstatus, reload, back }) {
                 {inv.payment.reference && <Row k="Reference" v={inv.payment.reference} />}
               </>}
             </div>
+            <RemindersCard inv={inv} />
             <button className="btn danger" onClick={del}>Delete invoice</button>
           </div>
           <div className="card inv-scroll" style={{ padding: 16 }}>
@@ -524,14 +525,52 @@ function PayModal({ inv, settings, onClose, onDone }) {
   );
 }
 
+// ── Payment reminder helpers ─────────────────────────────────
+// offsetDays: negative = before due date, 0 = on it, positive = after.
+function offsetLabel(n) {
+  if (n < 0) return `${-n} day${n === -1 ? '' : 's'} before due date`;
+  if (n === 0) return 'On due date';
+  return `${n} day${n === 1 ? '' : 's'} after due date`;
+}
+
+function AddOffsetRow({ onAdd }) {
+  const [days, setDays] = useState(7);
+  const [dir, setDir] = useState('after');
+  const add = () => {
+    const n = Math.abs(Math.trunc(+days || 0)) * (dir === 'before' ? -1 : 1);
+    onAdd(n);
+  };
+  return (
+    <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 }}>
+      <input type="number" min="0" value={days} onChange={(e) => setDays(e.target.value)} style={{ width: 80 }} />
+      <select value={dir} onChange={(e) => setDir(e.target.value)} style={{ width: 170 }}>
+        <option value="before">days before due date</option>
+        <option value="after">days after due date</option>
+      </select>
+      <button className="btn" onClick={add}>+ Add reminder</button>
+    </div>
+  );
+}
+
 // ── Send modal ───────────────────────────────────────────────
 function SendModal({ inv, settings, gstatus, docRef, onClose, onSent }) {
   const [to, setTo] = useState(inv.recipientEmail || '');
   const [cc, setCc] = useState('');
   const [subject, setSubject] = useState(`Invoice ${inv.number} from ${settings.businessName}`);
-  const [message, setMessage] = useState(
-    `Dear ${inv.billTo?.name},\n\nPlease find attached invoice ${inv.number} for ${window.invMoney(inv.total, inv.currency)}.\nDue date: ${window.invFmtDate(inv.dueDate)}.\n\nThank you,\n${settings.businessName}`);
+  const [message, setMessage] = useState('');
+  const [offsets, setOffsets] = useState([]); // [{days, on}]
   const [busy, setBusy] = useState(false);
+
+  // Server-built defaults: templated subject/body + org default reminder offsets.
+  useEffect(() => {
+    api('/invoices/' + inv.id + '/email-defaults')
+      .then((d) => {
+        setSubject(d.subject);
+        setMessage(d.message);
+        setOffsets((d.reminderOffsets || []).map((n) => ({ days: n, on: true })));
+      })
+      .catch((e) => toast(e.message, true));
+  }, [inv.id]);
 
   if (!gstatus.connected) {
     return (
@@ -552,11 +591,18 @@ function SendModal({ inv, settings, gstatus, docRef, onClose, onSent }) {
     if (!to) return toast('Recipient email required', true);
     setBusy(true);
     try {
+      const reminderOffsets = offsets.filter((o) => o.on).map((o) => o.days);
       // Server attaches the stored vector PDF automatically.
-      const r = await api('/invoices/' + inv.id + '/send', { method: 'POST', body: { to, cc, subject, message } });
-      toast('Sent to ' + to);
+      const r = await api('/invoices/' + inv.id + '/send', { method: 'POST', body: { to, cc, subject, message, reminderOffsets } });
+      const n = (r.reminders || []).filter((x) => x.status === 'pending').length;
+      toast('Sent to ' + to + (n ? ` · ${n} reminder${n === 1 ? '' : 's'} scheduled` : ''));
       onSent(r.invoice);
     } catch (e) { toast('Send failed: ' + e.message, true); } finally { setBusy(false); }
+  };
+
+  const addOffset = (n) => {
+    if (offsets.some((o) => o.days === n)) return toast('That reminder is already listed', true);
+    setOffsets([...offsets, { days: n, on: true }].sort((a, b) => a.days - b.days));
   };
 
   return (
@@ -571,8 +617,60 @@ function SendModal({ inv, settings, gstatus, docRef, onClose, onSent }) {
       </div>
       <div className="field"><label>Subject</label><input type="text" value={subject} onChange={(e) => setSubject(e.target.value)} /></div>
       <div className="field"><label>Message</label><textarea rows={7} value={message} onChange={(e) => setMessage(e.target.value)} /></div>
+      <div className="field">
+        <label>Payment reminders <span className="hint">(emailed with the PDF while the app is running; skipped once paid)</span></label>
+        {offsets.map((o, i) => (
+          <label key={o.days} style={{ display: 'flex', gap: 8, alignItems: 'center', fontWeight: 500, padding: '2px 0' }}>
+            <input type="checkbox" checked={o.on} style={{ width: 'auto' }}
+              onChange={() => setOffsets(offsets.map((x, j) => (j === i ? { ...x, on: !x.on } : x)))} />
+            {offsetLabel(o.days)}
+          </label>
+        ))}
+        <AddOffsetRow onAdd={addOffset} />
+      </div>
       <div className="muted small">The {inv.number}.pdf invoice is attached automatically.</div>
     </Modal>
+  );
+}
+
+// ── Reminders card (invoice detail) ──────────────────────────
+function RemindersCard({ inv }) {
+  const [rems, setRems] = useState(null);
+  const load = useCallback(async () => {
+    try { setRems(await api('/invoices/' + inv.id + '/reminders')); } catch (e) { toast(e.message, true); }
+  }, [inv.id]);
+  useEffect(() => { load(); }, [load, inv.updatedAt]);
+
+  const cancel = async (r) => {
+    try { setRems(await api('/reminders/' + r.id, { method: 'DELETE' })); toast('Reminder cancelled'); }
+    catch (e) { toast(e.message, true); }
+  };
+  const add = async (n) => {
+    try { setRems(await api('/invoices/' + inv.id + '/reminders', { method: 'POST', body: { offsetDays: n } })); toast('Reminder scheduled'); }
+    catch (e) { toast(e.message, true); }
+  };
+
+  const badge = (r) =>
+    r.status === 'sent' ? <span className="badge paid">sent</span>
+    : r.status === 'cancelled' ? <span className="badge draft">cancelled</span>
+    : r.error ? <span className="badge overdue" title={r.error}>retrying</span>
+    : <span className="badge sent">scheduled</span>;
+
+  return (
+    <div className="card card-pad" style={{ marginBottom: 16 }}>
+      <h2 className="section-title">Payment reminders</h2>
+      {!rems ? <div className="muted small">Loading…</div> : <>
+        {rems.length === 0 && <p className="muted small" style={{ margin: '4px 0' }}>None scheduled. Reminders are set when sending, or add one below.</p>}
+        {rems.map((r) => (
+          <div key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 0' }}>
+            <span className="small" style={{ flex: 1 }}>{window.invFmtDate(r.dueOn)} <span className="muted">— {offsetLabel(r.offsetDays)}</span></span>
+            {badge(r)}
+            {r.status === 'pending' && <button className="btn" style={{ padding: '2px 8px' }} onClick={() => cancel(r)} title="Cancel this reminder">✕</button>}
+          </div>
+        ))}
+        {inv.status !== 'paid' && inv.status !== 'void' && <AddOffsetRow onAdd={add} />}
+      </>}
+    </div>
   );
 }
 
@@ -803,6 +901,7 @@ function SettingsPage({ settings, gstatus, reload }) {
     currency: settings.currency, invoicePrefix: settings.invoicePrefix, nextNumber: settings.nextNumber,
     defaultTerms: settings.defaultTerms, defaultTaxLabel: settings.defaultTaxLabel, defaultNotes: settings.defaultNotes,
     logo: settings.logo || null, logoBg: settings.logoBg || 'light',
+    reminderOffsets: settings.reminderOffsets || [0],
   });
   const [busy, setBusy] = useState(false);
   const set = (k, v) => setF({ ...f, [k]: v });
@@ -823,6 +922,7 @@ function SettingsPage({ settings, gstatus, reload }) {
         logo: f.logo, logoBg: f.logoBg,
         invoicePrefix: f.invoicePrefix, nextNumber: +f.nextNumber, defaultTerms: f.defaultTerms,
         defaultTaxLabel: f.defaultTaxLabel, defaultNotes: f.defaultNotes,
+        reminderOffsets: f.reminderOffsets,
       } });
       toast('Settings saved'); await reload();
     } catch (e) { toast(e.message, true); } finally { setBusy(false); }
@@ -877,6 +977,25 @@ function SettingsPage({ settings, gstatus, reload }) {
               </div>
             </div>
           </div>
+        </div>
+
+        <div className="card card-pad" style={{ marginBottom: 18 }}>
+          <h2 className="section-title">Payment reminders — defaults</h2>
+          <p className="muted small" style={{ marginTop: -6 }}>
+            Pre-selected reminders when you send an invoice (adjustable per invoice in the send dialog).
+            Reminder emails go out via Gmail while the app is running and stop automatically once the invoice is paid.
+          </p>
+          {f.reminderOffsets.length === 0 && <p className="muted small">No default reminders.</p>}
+          {f.reminderOffsets.map((n) => (
+            <div key={n} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '3px 0' }}>
+              <span className="small" style={{ flex: 1 }}>{offsetLabel(n)}</span>
+              <button className="btn" style={{ padding: '2px 8px' }} onClick={() => set('reminderOffsets', f.reminderOffsets.filter((x) => x !== n))} title="Remove">✕</button>
+            </div>
+          ))}
+          <AddOffsetRow onAdd={(n) => {
+            if (f.reminderOffsets.includes(n)) return toast('That reminder is already listed', true);
+            set('reminderOffsets', [...f.reminderOffsets, n].sort((a, b) => a - b));
+          }} />
         </div>
 
         <div className="card card-pad">
