@@ -1,13 +1,65 @@
 const { useState, useEffect, useRef, useCallback } = React;
 
+// ── Session ──────────────────────────────────────────────────
+// The server proxies sign-in, so there is no Supabase key in this file — only a
+// short-lived user token. Stored in localStorage so a reload keeps you signed in.
+const SESSION_KEY = 'inv_session';
+
+const session = {
+  get() {
+    try { return JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); }
+    catch { return null; }
+  },
+  set(s) {
+    if (s) localStorage.setItem(SESSION_KEY, JSON.stringify(s));
+    else localStorage.removeItem(SESSION_KEY);
+    _onSessionChange(s);
+  },
+  token() { const s = session.get(); return s && s.accessToken; },
+};
+let _onSessionChange = () => {};
+
+// Refresh once, and share the in-flight attempt so a burst of parallel 401s
+// does not fire N refreshes (which would invalidate each other's refresh token).
+let refreshing = null;
+async function refreshSession() {
+  const s = session.get();
+  if (!s || !s.refreshToken) return null;
+  if (!refreshing) {
+    refreshing = fetch('/api/auth/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken: s.refreshToken }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((next) => { session.set(next); return next; })
+      .catch(() => { session.set(null); return null; })
+      .finally(() => { refreshing = null; });
+  }
+  return refreshing;
+}
+
 // ── API helper ───────────────────────────────────────────────
-async function api(path, opts = {}) {
+async function api(path, opts = {}, _retried) {
+  const token = session.token();
   const res = await fetch('/api' + path, {
-    headers: { 'Content-Type': 'application/json' },
     ...opts,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: 'Bearer ' + token } : {}),
+      ...(opts.headers || {}),
+    },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
+
+  // An expired token is recoverable: refresh once and replay. Anything else
+  // 401 means the session is genuinely gone, so drop it and show the login.
+  if (res.status === 401 && !_retried) {
+    if (data.expired && (await refreshSession())) return api(path, opts, true);
+    session.set(null);
+    throw new Error(data.error || 'Please sign in');
+  }
   if (!res.ok) throw new Error(data.error || ('Request failed (' + res.status + ')'));
   return data;
 }
@@ -60,8 +112,64 @@ function datePresets() {
   ];
 }
 
-// ── Root: routes between the landing page, onboarding, and the app ───
+// ── Login ────────────────────────────────────────────────────
+function Login({ onSignedIn }) {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true); setErr(null);
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Could not sign in');
+      session.set(data);
+      onSignedIn(data);
+    } catch (e2) {
+      setErr(e2.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="login-wrap">
+      <form className="login-card" onSubmit={submit}>
+        <h1 className="login-title">Simple Invoicing</h1>
+        <p className="muted small login-sub">Sign in to continue</p>
+
+        {err && <div className="login-error">{err}</div>}
+
+        <label className="lbl">Email</label>
+        <input className="inp" type="email" autoComplete="username" required autoFocus
+          value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" />
+
+        <label className="lbl">Password</label>
+        <input className="inp" type="password" autoComplete="current-password" required
+          value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" />
+
+        <button className="btn primary login-btn" type="submit" disabled={busy}>
+          {busy ? <span className="spin"></span> : 'Sign in'}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+// ── Root: routes between login, the landing page, onboarding, and the app ───
 function Root() {
+  const [signedIn, setSignedIn] = useState(() => Boolean(session.token()));
+  // api() clears the session on an unrecoverable 401; this bounces to the login
+  // screen without every caller having to handle it.
+  _onSessionChange = (s) => setSignedIn(Boolean(s && s.accessToken));
+
   const [screen, setScreen] = useState(() => localStorage.getItem('inv_screen') || 'landing');
   const [orgs, setOrgs] = useState(null);          // null = still loading
   const [currentOrgId, setCurrentOrgId] = useState(null);
@@ -73,7 +181,10 @@ function Root() {
     setOrgs(d.orgs); setCurrentOrgId(d.currentOrgId);
     return d;
   }, []);
-  useEffect(() => { loadOrgs().catch((e) => { setOrgs([]); toast(e.message, true); }); }, [loadOrgs]);
+  useEffect(() => {
+    if (!signedIn) { setOrgs(null); return; }
+    loadOrgs().catch((e) => { setOrgs([]); toast(e.message, true); });
+  }, [loadOrgs, signedIn]);
 
   useEffect(() => {
     if (!toastMsg) return;
@@ -101,6 +212,14 @@ function Root() {
 
   const toastNode = toastMsg && <div className={'toast' + (toastMsg.isErr ? ' err' : '')}>{toastMsg.msg}</div>;
 
+  const signOut = () => {
+    session.set(null);
+    localStorage.removeItem('inv_screen');
+    setScreen('landing');
+  };
+
+  if (!signedIn) return <>{<Login onSignedIn={() => setSignedIn(true)} />}{toastNode}</>;
+
   if (orgs === null) return <div className="loading-screen">Loading…</div>;
 
   // The app needs an org to work in; without one, force onboarding.
@@ -113,13 +232,14 @@ function Root() {
     view = <Onboarding first={orgs.length === 0} onDone={onboarded} onCancel={() => goScreen(orgs.length ? 'app' : 'landing')} />;
   } else {
     view = <App key={currentOrgId} orgs={orgs} currentOrgId={currentOrgId}
-      onSwitchOrg={switchOrg} onAddOrg={() => goScreen('onboarding')} onExit={() => goScreen('landing')} />;
+      onSwitchOrg={switchOrg} onAddOrg={() => goScreen('onboarding')} onExit={() => goScreen('landing')}
+      onSignOut={signOut} />;
   }
   return <>{view}{toastNode}</>;
 }
 
 // ── Authenticated app shell (scoped to the active org) ───────
-function App({ orgs, currentOrgId, onSwitchOrg, onAddOrg, onExit }) {
+function App({ orgs, currentOrgId, onSwitchOrg, onAddOrg, onExit, onSignOut }) {
   const [page, setPage] = useState('dashboard');
   const [openInvoiceId, setOpenInvoiceId] = useState(null);
   const [settings, setSettings] = useState(null);
@@ -148,7 +268,8 @@ function App({ orgs, currentOrgId, onSwitchOrg, onAddOrg, onExit }) {
   return (
     <div className="app">
       <Sidebar page={page} go={go} settings={settings}
-        orgs={orgs} currentOrgId={currentOrgId} onSwitchOrg={onSwitchOrg} onAddOrg={onAddOrg} onExit={onExit} />
+        orgs={orgs} currentOrgId={currentOrgId} onSwitchOrg={onSwitchOrg} onAddOrg={onAddOrg} onExit={onExit}
+        onSignOut={onSignOut} />
       <div className="main">
         {page === 'dashboard' && <Dashboard invoices={invoices} customers={customers} settings={settings} openInvoice={openInvoice} go={go} />}
         {page === 'invoices' && <InvoicesPage invoices={invoices} customers={customers} products={products} settings={settings} reload={reload} openInvoice={openInvoice} />}
@@ -162,7 +283,7 @@ function App({ orgs, currentOrgId, onSwitchOrg, onAddOrg, onExit }) {
   );
 }
 
-function Sidebar({ page, go, settings, orgs, currentOrgId, onSwitchOrg, onAddOrg, onExit }) {
+function Sidebar({ page, go, settings, orgs, currentOrgId, onSwitchOrg, onAddOrg, onExit, onSignOut }) {
   const businessName = settings.businessName;
   const items = [
     ['dashboard', Ico.dash, 'Dashboard'],
@@ -176,7 +297,7 @@ function Sidebar({ page, go, settings, orgs, currentOrgId, onSwitchOrg, onAddOrg
   return (
     <div className="sidebar">
       <OrgSwitcher businessName={businessName} orgs={orgs} currentOrgId={currentOrgId}
-        onSwitchOrg={onSwitchOrg} onAddOrg={onAddOrg} onExit={onExit} />
+        onSwitchOrg={onSwitchOrg} onAddOrg={onAddOrg} onExit={onExit} onSignOut={onSignOut} />
       {items.map(([p, ico, label]) => (
         <div key={p} className={'nav-item' + (isActive(p) ? ' active' : '')} onClick={() => go(p)}>
           <span className="ico">{ico}</span>{label}
@@ -1121,7 +1242,7 @@ function InvoiceExportModal({ invoices, customers, settings, onClose }) {
 }
 
 // ── Org switcher (sidebar) ───────────────────────────────────
-function OrgSwitcher({ businessName, orgs, currentOrgId, onSwitchOrg, onAddOrg, onExit }) {
+function OrgSwitcher({ businessName, orgs, currentOrgId, onSwitchOrg, onAddOrg, onExit, onSignOut }) {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
   useEffect(() => {
@@ -1159,6 +1280,9 @@ function OrgSwitcher({ businessName, orgs, currentOrgId, onSwitchOrg, onAddOrg, 
           <button className="org-menu-item action" onClick={() => { setOpen(false); onExit(); }}>
             <span className="org-menu-dot">⤶</span><span className="org-menu-text">Exit to home</span>
           </button>
+          <button className="org-menu-item action" onClick={() => { setOpen(false); onSignOut(); }}>
+            <span className="org-menu-dot">⏻</span><span className="org-menu-text">Sign out</span>
+          </button>
         </div>
       )}
     </div>
@@ -1184,7 +1308,7 @@ function LandingPage({ onGo }) {
         </p>
         <div className="landing-cta">
           <button className="btn primary lg" onClick={onGo}>Go to app →</button>
-          <span className="landing-cta-note">No sign-up needed — your data stays on this machine.</span>
+          <span className="landing-cta-note">Your data is private to your account.</span>
         </div>
         <div className="landing-grid">
           {features.map(([ico, t, d]) => (

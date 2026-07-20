@@ -337,3 +337,19 @@ textarea { resize: vertical; min-height: 70px; }
 .small { font-size: 12px; }
 .spin { display:inline-block; width:14px; height:14px; border:2px solid rgba(255,255,255,.4); border-top-color:#fff; border-radius:50%; animation: sp .7s linear infinite; }
 @keyframes sp { to { transform: rotate(360deg); } }
+
+/* ── Login ─────────────────────────────────────────────────── */
+.login-wrap { display: grid; place-items: center; min-height: 100vh; padding: 24px; background: var(--bg, #f5f6f8); }
+.login-card {
+  width: 100%; max-width: 380px; background: #fff; border-radius: 14px;
+  padding: 32px 28px; box-shadow: 0 8px 30px rgba(0,0,0,.08); border: 1px solid #eceef1;
+}
+.login-title { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.2px; }
+.login-sub { margin: 6px 0 22px; }
+.login-card .lbl { display: block; font-size: 12px; font-weight: 600; color: #444; margin: 14px 0 6px; }
+.login-card .inp { width: 100%; box-sizing: border-box; }
+.login-btn { width: 100%; margin-top: 22px; justify-content: center; }
+.login-error {
+  background: #fdeaea; border: 1px solid #f5c2c2; color: #a12626;
+  padding: 9px 11px; border-radius: 8px; font-size: 13px; margin-bottom: 4px;
+}

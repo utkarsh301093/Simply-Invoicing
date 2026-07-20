@@ -1,31 +1,33 @@
 #!/usr/bin/env bash
-# Prove the RLS policies in 0002_auth_policies.sql actually isolate tenants,
-# using a throwaway Postgres container. No Supabase project or credentials.
+# End-to-end auth + tenant-isolation test against a throwaway Postgres.
+# No Supabase project, no credentials, nothing touches production.
 #
-#   ./scripts/test-rls.sh
+#   ./scripts/test-auth.sh
 set -euo pipefail
 
-CONTAINER=invoicing-rls-test
-IMAGE=postgres:16-alpine
+NAME=invoicing-auth-test
+PORT=55435
+URL="postgresql://postgres:test@127.0.0.1:${PORT}/invoicing_auth"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-cleanup() { docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; }
+cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 cleanup
 
-echo "→ starting $IMAGE"
-docker run -d --name "$CONTAINER" -e POSTGRES_PASSWORD=test -e POSTGRES_DB=invoicing_rls "$IMAGE" >/dev/null
+echo "→ starting postgres"
+docker run -d --name "$NAME" -e POSTGRES_PASSWORD=test -e POSTGRES_DB=invoicing_auth \
+  -p "${PORT}:5432" postgres:16-alpine >/dev/null
 
-printf '→ waiting for postgres'
+printf '→ waiting'
 for _ in $(seq 1 60); do
-  docker exec "$CONTAINER" psql -U postgres -d invoicing_rls -c "select 1" >/dev/null 2>&1 && break
+  docker exec "$NAME" psql -U postgres -d invoicing_auth -c "select 1" >/dev/null 2>&1 && break
   printf '.'; sleep 0.5
 done
 echo
 
-run() { docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d invoicing_rls "$@"; }
+run() { docker exec -i "$NAME" psql -v ON_ERROR_STOP=1 -U postgres -d invoicing_auth "$@"; }
 
-# Supabase-provided pieces the schema depends on. Local only.
+# The Supabase-managed pieces the schema and policies depend on.
 echo "→ stubbing Supabase auth"
 run -q <<'SQL'
 create schema if not exists auth;
@@ -47,5 +49,6 @@ for f in "$ROOT"/supabase/migrations/*.sql; do
   run -q < "$f"
 done
 
-echo "→ running isolation tests"
-run < "$ROOT/supabase/tests/rls_isolation.sql"
+echo "→ running auth isolation test"
+cd "$ROOT"
+TEST_DATABASE_URL="$URL" node --test test/auth-isolation.test.js

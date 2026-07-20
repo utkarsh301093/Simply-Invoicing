@@ -25,11 +25,28 @@ case "${1:-up}" in
     done
     echo
 
-    # auth.users is a Supabase-managed table the schema references; stub it locally.
-    docker exec -i "$NAME" psql -U postgres -d invoicing_test -q \
-      -c "create schema if not exists auth; create table if not exists auth.users (id uuid primary key);"
-    docker exec -i "$NAME" psql -U postgres -d invoicing_test -v ON_ERROR_STOP=1 -q \
-      < "$ROOT/supabase/migrations/0001_initial_schema.sql"
+    # Stub the Supabase-managed pieces the schema and RLS policies depend on:
+    # auth.users (referenced by organizations.owner_user_id), auth.uid() (read by
+    # every policy) and the anon/authenticated/service_role roles the server
+    # switches into per request.
+    docker exec -i "$NAME" psql -U postgres -d invoicing_test -v ON_ERROR_STOP=1 -q <<'SQL'
+create schema if not exists auth;
+create table if not exists auth.users (id uuid primary key);
+create or replace function auth.uid() returns uuid language sql stable as $$
+  select nullif(current_setting('request.jwt.claims', true)::json ->> 'sub', '')::uuid;
+$$;
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname='anon') then create role anon nologin; end if;
+  if not exists (select 1 from pg_roles where rolname='authenticated') then create role authenticated nologin; end if;
+  if not exists (select 1 from pg_roles where rolname='service_role') then create role service_role nologin bypassrls; end if;
+end $$;
+grant usage on schema auth to authenticated, service_role;
+SQL
+
+    # Every migration, not just the first — the policies live in 0002.
+    for f in "$ROOT"/supabase/migrations/*.sql; do
+      docker exec -i "$NAME" psql -U postgres -d invoicing_test -v ON_ERROR_STOP=1 -q < "$f"
+    done
 
     echo "test database ready"
     echo "TEST_DATABASE_URL=$URL"

@@ -5,6 +5,7 @@
 // can be diffed against it. Nothing here knows how the data is persisted.
 const { spawn } = require('child_process');
 const net = require('net');
+const http = require('http');
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
@@ -29,7 +30,8 @@ async function waitForReady(baseUrl, child, timeoutMs = 20000) {
     if (child.exitCode !== null) throw new Error(`server exited early (code ${child.exitCode})`);
     try {
       const r = await fetch(baseUrl + '/api/orgs');
-      if (r.ok) return;
+      // Data routes now require auth, so an unauthenticated 401 means "listening".
+      if (r.ok || r.status === 401) return;
     } catch {
       /* not listening yet */
     }
@@ -46,12 +48,45 @@ const TABLES = [
   'integrations', 'app_state', 'organizations',
 ];
 
+// The API requires a verified Supabase JWT. Rather than weaken auth for tests,
+// the harness becomes its own issuer: an ES256 keypair served over a throwaway
+// JWKS endpoint, with AUTH_JWKS_URL pointing the server at it. That exercises
+// server/auth.js exactly as production does — only the signing authority differs.
+const TEST_USER = '00000000-0000-0000-0000-0000000000a1';
+
+async function startIssuer() {
+  const { generateKeyPair, exportJWK, SignJWT } = require('jose');
+  const { privateKey, publicKey } = await generateKeyPair('ES256', { extractable: true });
+  const jwk = await exportJWK(publicKey);
+  Object.assign(jwk, { kid: 'harness', alg: 'ES256', use: 'sig' });
+
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ keys: [jwk] }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  const now = Math.floor(Date.now() / 1000);
+  const token = await new SignJWT({ role: 'authenticated' })
+    .setProtectedHeader({ alg: 'ES256', kid: 'harness' })
+    .setSubject(TEST_USER)
+    .setAudience('authenticated')
+    .setIssuedAt(now)
+    .setExpirationTime(now + 3600)
+    .sign(privateKey);
+
+  return { url: `http://127.0.0.1:${server.address().port}/`, token, close: () => server.close() };
+}
+
 async function resetDatabase(connectionString) {
   const { Client } = require('pg');
   const c = new Client({ connectionString, ssl: /supabase\.(co|com)/.test(connectionString) ? { rejectUnauthorized: false } : undefined });
   await c.connect();
   try {
     await c.query(`truncate ${TABLES.join(', ')} restart identity cascade`);
+    // organizations.owner_user_id references auth.users; the row must exist
+    // before the suite can create an org.
+    await c.query('insert into auth.users (id) values ($1) on conflict do nothing', [TEST_USER]);
   } finally {
     await c.end();
   }
@@ -77,6 +112,7 @@ async function startServer() {
 
   await resetDatabase(connectionString);
 
+  const issuer = await startIssuer();
   const port = await freePort();
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'invoicing-test-'));
   const child = spawn(process.execPath, [SERVER], {
@@ -85,6 +121,7 @@ async function startServer() {
       PORT: String(port),
       DATA_DIR: dataDir,
       DATABASE_URL: connectionString,
+      AUTH_JWKS_URL: issuer.url,
       // Unset so storage falls back to the local filesystem driver under
       // DATA_DIR — no test ever writes to a real bucket.
       SUPABASE_URL: '',
@@ -114,7 +151,10 @@ async function startServer() {
   async function api(method, urlPath, body) {
     const res = await fetch(baseUrl + urlPath, {
       method,
-      headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+      headers: {
+        Authorization: `Bearer ${issuer.token}`,
+        ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const type = res.headers.get('content-type') || '';
@@ -133,8 +173,10 @@ async function startServer() {
     baseUrl,
     dataDir,
     logs,
+    token: issuer.token,
     stop() {
       child.kill('SIGKILL');
+      issuer.close();
       fs.rmSync(dataDir, { recursive: true, force: true });
     },
   };

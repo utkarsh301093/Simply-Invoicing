@@ -12,6 +12,7 @@
 //     race that could hand two concurrent requests the same number.
 require('./pgtypes');
 const { Pool } = require('pg');
+const { AsyncLocalStorage } = require('async_hooks');
 const storage = require('./storage');
 
 const pool = new Pool({
@@ -32,8 +33,63 @@ function id(prefix) {
   return prefix + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
 
+// ── Request session ─────────────────────────────────────────────────────────
+// RLS needs Postgres to know *who* is asking. That identity has to reach every
+// query, but threading a client argument through ~40 repository functions would
+// touch all of them and be easy to forget on the next one. Instead the client
+// lives in async context: q()/one()/tx() pick it up automatically, so the
+// repositories below are unchanged and cannot accidentally opt out.
+//
+// withUser() opens ONE transaction per request, sets the verified JWT claims and
+// switches to the `authenticated` role. `set local` scopes both to that
+// transaction, so a pooled connection can never leak one user's identity into
+// the next request — which is also why the whole request must share a single
+// transaction rather than a connection.
+const session = new AsyncLocalStorage();
+
+function runner() {
+  const ctx = session.getStore();
+  return (ctx && ctx.client) || pool;
+}
+
+// True when the current request is scoped to a signed-in user (RLS applies).
+function isUserScoped() {
+  const ctx = session.getStore();
+  return Boolean(ctx && ctx.client);
+}
+
+async function withUser(claims, fn) {
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    // Set claims BEFORE dropping privileges — set_config on a reserved setting
+    // is not something the `authenticated` role may do itself.
+    await client.query(`select set_config('request.jwt.claims', $1, true)`, [JSON.stringify(claims)]);
+    await client.query('set local role authenticated');
+    const out = await session.run({ client, claims }, () => fn());
+    await client.query('commit');
+    return out;
+  } catch (e) {
+    await client.query('rollback').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+// Escape hatch for work that has no user: the hourly schedulers sweep every org,
+// and org creation must write the owner_user_id row that RLS then keys off. Runs
+// as the connecting role (table owner), so RLS does not apply. Keep the surface
+// small and deliberate.
+// claims are carried through even though RLS is bypassed: "who is asking" still
+// decides which app_state row to touch and who owns a newly created org.
+async function withService(fn, claims) {
+  const ctx = session.getStore();
+  return session.run({ client: null, claims: claims || (ctx && ctx.claims) || null }, () => fn());
+}
+
 async function q(text, params) {
-  const res = await pool.query(text, params);
+  const res = await runner().query(text, params);
   return res.rows;
 }
 
@@ -42,8 +98,34 @@ async function one(text, params) {
   return rows[0] || null;
 }
 
-// Run fn inside a transaction on a dedicated client.
+let savepointSeq = 0;
+
+// Run fn inside a transaction. Inside withUser() the request already owns one —
+// opening a second on a different client would run outside the JWT context and
+// silently see nothing, so nest on a SAVEPOINT instead.
+//
+// The savepoint is load-bearing, not tidiness: routes catch domain errors and
+// answer 4xx without rethrowing, so the request transaction goes on to COMMIT.
+// Without a savepoint, a rejected invoice create would keep the `next_number`
+// increment it had already made and burn an invoice number — the gap-free
+// numbering that several tax jurisdictions require. The characterization suite
+// catches this precise case.
 async function tx(fn) {
+  const ctx = session.getStore();
+  if (ctx && ctx.client) {
+    const client = ctx.client;
+    const sp = `sp_${++savepointSeq}`;
+    await client.query(`savepoint ${sp}`);
+    try {
+      const out = await fn(client);
+      await client.query(`release savepoint ${sp}`);
+      return out;
+    } catch (e) {
+      await client.query(`rollback to savepoint ${sp}`).catch(() => {});
+      throw e;
+    }
+  }
+
   const client = await pool.connect();
   try {
     await client.query('begin');
@@ -209,12 +291,12 @@ const orgs = {
   async create(fields) {
     const r = await one(
       `insert into organizations (id, name, business_name, address_lines, tax_id, currency,
-         tax_label, terms, notes, invoice_prefix, next_number, reminder_offsets)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) returning ${ORG_COLS}`,
+         tax_label, terms, notes, invoice_prefix, next_number, reminder_offsets, owner_user_id)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) returning ${ORG_COLS}`,
       [id('org'), fields.name, fields.businessName || fields.name, JSON.stringify(fields.addressLines || []),
        fields.taxId || '', fields.currency || '$', fields.taxLabel || 'IGST', fields.terms || 'Net 15',
        fields.notes || '', fields.invoicePrefix || 'INV-', fields.nextNumber || 1,
-       JSON.stringify(fields.reminderOffsets || [0])]
+       JSON.stringify(fields.reminderOffsets || [0]), fields.ownerUserId || null]
     );
     return orgFromRow(r);
   },
@@ -239,8 +321,8 @@ const orgs = {
   // Atomic. The JSON version read nextNumber, incremented in memory and saved —
   // two concurrent requests could both read the same value.
   async nextInvoiceNumber(orgId, client) {
-    const runner = client || pool;
-    const { rows } = await runner.query(
+    const conn = client || runner();
+    const { rows } = await conn.query(
       'update organizations set next_number = next_number + 1 where id = $1 returning invoice_prefix, next_number - 1 as issued',
       [orgId]
     );
@@ -259,18 +341,27 @@ const orgs = {
 
 // ── App state (replaces db.meta) ────────────────────────────────────────────
 
+// Pre-auth rows were written under this sentinel; it stays as the fallback for
+// service-role work (the schedulers), which has no user.
 const SINGLE_USER = '00000000-0000-0000-0000-000000000000';
+
+// "Which org is active" is per-user. app_state is already keyed by user_id, so
+// reading the subject out of the request session is all it takes.
+function currentUserId() {
+  const ctx = session.getStore();
+  return (ctx && ctx.claims && ctx.claims.sub) || SINGLE_USER;
+}
 
 const appState = {
   async currentOrgId() {
-    const r = await one('select current_org_id from app_state where user_id = $1', [SINGLE_USER]);
+    const r = await one('select current_org_id from app_state where user_id = $1', [currentUserId()]);
     return r ? r.current_org_id : null;
   },
   async setCurrentOrg(orgId) {
     await q(
       `insert into app_state (user_id, current_org_id) values ($1, $2)
        on conflict (user_id) do update set current_org_id = excluded.current_org_id`,
-      [SINGLE_USER, orgId]
+      [currentUserId(), orgId]
     );
   },
 };
@@ -416,7 +507,7 @@ const invoices = {
   },
   // Insert invoice + its lines atomically. `rec` is a legacy-shaped record.
   async create(rec, client) {
-    const run = (text, params) => (client ? client.query(text, params) : pool.query(text, params));
+    const run = (text, params) => (client || runner()).query(text, params);
     await run(
       `insert into invoices (id, org_id, number, customer_id, recurring_schedule_id, invoice_date, due_date,
          terms, currency, tax_label, snapshot, sub_total, tax_total, total, notes)
@@ -609,7 +700,7 @@ const recurring = {
     return this.byId(orgId, sid);
   },
   async advance(sid, nextRunDate, client) {
-    const run = (t, p) => (client ? client.query(t, p) : pool.query(t, p));
+    const run = (t, p) => (client || runner()).query(t, p);
     await run('update recurring_schedules set next_run_date=$2, last_generated_at=now() where id=$1', [sid, nextRunDate]);
   },
   async archive(orgId, sid) {
@@ -621,7 +712,7 @@ const recurring = {
 
 const activity = {
   async log(orgId, type, refType, refId, message, client) {
-    const run = (t, p) => (client ? client.query(t, p) : pool.query(t, p));
+    const run = (t, p) => (client || runner()).query(t, p);
     await run(
       'insert into activity (id, org_id, type, ref_type, ref_id, message) values ($1,$2,$3,$4,$5,$6)',
       [id('act'), orgId, type, refType, refId, message]
@@ -661,6 +752,7 @@ async function connect() {
 
 module.exports = {
   pool, q, one, tx, id, nowISO, connect,
+  withUser, withService, isUserScoped, currentUserId,
   orgs, appState, activeOrg, customers, items, invoices, payments, reminders, recurring, activity, integrations,
   logoDataUrl, putLogo,
 };

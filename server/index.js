@@ -2,6 +2,7 @@ require('dotenv').config();
 const path = require('path');
 const express = require('express');
 const db = require('./db');
+const auth = require('./auth');
 const storage = require('./storage');
 const google = require('./google');
 const { renderInvoicePdf } = require('./pdf');
@@ -121,13 +122,66 @@ async function requireOrg(res) {
 // Every route body now performs I/O, so a thrown error must not hang the
 // request or take the process down. This wrapper is the single place that
 // turns an unexpected failure into a 500.
+// ─────────────────────────────────────────────────────────────
+// Route wrappers
+//
+// Three flavours, so the access level of every route is visible at its
+// definition rather than buried in middleware ordering:
+//
+//   route()        signed in; runs inside db.withUser() so RLS applies.
+//   serviceRoute() signed in, but bypasses RLS. Only for work RLS cannot
+//                  express — creating an org (the owner_user_id row RLS keys
+//                  off does not exist yet) and reading Gmail tokens.
+//   openRoute()    no auth. OAuth redirects and static assets only.
+//
+// All three funnel rejections into a 500 rather than a hung request.
+// ─────────────────────────────────────────────────────────────
+function fail(req, res) {
+  return (e) => {
+    console.error(`${req.method} ${req.path} failed:`, e.message);
+    if (!res.headersSent) res.status(500).json({ error: e.message });
+  };
+}
+
+function openRoute(handler) {
+  return (req, res) => Promise.resolve(handler(req, res)).catch(fail(req, res));
+}
+
 function route(handler) {
   return (req, res) => {
-    Promise.resolve(handler(req, res)).catch((e) => {
-      console.error(`${req.method} ${req.path} failed:`, e.message);
-      if (!res.headersSent) res.status(500).json({ error: e.message });
-    });
+    Promise.resolve()
+      .then(async () => {
+        if (!(await authenticate(req, res))) return;
+        return db.withUser(req.claims, () => handler(req, res));
+      })
+      .catch(fail(req, res));
   };
+}
+
+function serviceRoute(handler) {
+  return (req, res) => {
+    Promise.resolve()
+      .then(async () => {
+        if (!(await authenticate(req, res))) return;
+        return db.withService(() => handler(req, res), req.claims);
+      })
+      .catch(fail(req, res));
+  };
+}
+
+// Verifies the bearer token, or writes a 401 and returns false.
+async function authenticate(req, res) {
+  const token = auth.bearer(req);
+  if (!token) { res.status(401).json({ error: 'Not signed in' }); return false; }
+  try {
+    req.claims = await auth.verifyToken(token);
+    req.userId = req.claims.sub;
+    return true;
+  } catch (e) {
+    const expired = /exp/i.test(e.code || '') || /expired/i.test(e.message || '');
+    res.status(401).json({ error: expired ? 'Session expired' : 'Invalid session', expired });
+    return false;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -223,10 +277,14 @@ app.get('/api/orgs', route(async (req, res) => {
   res.json({ currentOrgId: effective, orgs });
 }));
 
-app.post('/api/orgs', route(async (req, res) => {
+// Service-scoped: RLS grants access via organizations.owner_user_id, which does
+// not exist until this insert runs, so the user cannot create their own org
+// under RLS. Ownership is taken from the verified token, never from the body.
+app.post('/api/orgs', serviceRoute(async (req, res) => {
   const name = (req.body.businessName || req.body.name || '').trim();
   if (!name) return res.status(400).json({ error: 'Business name is required' });
   const org = await db.orgs.create({
+    ownerUserId: req.userId,
     name, businessName: name,
     addressLines: Array.isArray(req.body.addressLines) ? req.body.addressLines : [],
     taxId: req.body.gstin != null ? req.body.gstin : '',
@@ -796,6 +854,70 @@ app.get('/api/export', route(async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 // Google auth (global — one Gmail account sends for the active org)
 // ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// Auth
+//
+// Sign-in is proxied through this server rather than done in the browser with a
+// publishable key. That keeps the invariant the rest of the app already relies
+// on — the frontend talks only to this API, never to Supabase — so there is no
+// Supabase key in client code at all.
+//
+// The browser still ends up holding the access token (it must, to authenticate
+// subsequent calls), but it is a short-lived user token, not a project key.
+// ─────────────────────────────────────────────────────────────
+async function supabaseAuth(pathname, body) {
+  // SUPABASE_AUTH_URL exists only so tests can point auth at a local issuer
+  // without also redirecting Storage (which SUPABASE_URL controls). Unset in
+  // production, where both live on the same project.
+  const base = (process.env.SUPABASE_AUTH_URL || process.env.SUPABASE_URL || '').replace(/\/+$/, '');
+  const key = process.env.SUPABASE_SECRET_KEY || '';
+  if (!base || !key) throw new Error('Supabase is not configured');
+  const r = await fetch(`${base}/auth/v1/${pathname}`, {
+    method: 'POST',
+    headers: { apikey: key, Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return { ok: r.ok, status: r.status, data: await r.json().catch(() => ({})) };
+}
+
+// Only the fields the frontend needs. Never echo the refresh token into logs.
+function sessionView(d) {
+  return {
+    accessToken: d.access_token,
+    refreshToken: d.refresh_token,
+    expiresAt: d.expires_at,
+    user: d.user ? { id: d.user.id, email: d.user.email } : null,
+  };
+}
+
+app.post('/api/auth/login', openRoute(async (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const password = String(req.body.password || '');
+  if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
+
+  const r = await supabaseAuth('token?grant_type=password', { email, password });
+  if (!r.ok) {
+    // Supabase distinguishes bad credentials from unconfirmed email; both are
+    // reported to the user as-is, but neither reveals whether the account exists.
+    const msg = r.data.error_description || r.data.msg || 'Invalid email or password';
+    return res.status(401).json({ error: msg });
+  }
+  res.json(sessionView(r.data));
+}));
+
+app.post('/api/auth/refresh', openRoute(async (req, res) => {
+  const refreshToken = req.body.refreshToken;
+  if (!refreshToken) return res.status(400).json({ error: 'refreshToken is required' });
+  const r = await supabaseAuth('token?grant_type=refresh_token', { refresh_token: refreshToken });
+  if (!r.ok) return res.status(401).json({ error: 'Session expired, please sign in again' });
+  res.json(sessionView(r.data));
+}));
+
+// Who am I — also the frontend's "is my stored token still good" probe.
+app.get('/api/auth/me', route(async (req, res) => {
+  res.json({ id: req.claims.sub, email: req.claims.email || null });
+}));
+
 app.get('/api/google/status', (req, res) => res.json(google.status()));
 
 app.get('/auth/google', (req, res) => {
@@ -804,7 +926,7 @@ app.get('/auth/google', (req, res) => {
   res.redirect(google.authUrl());
 });
 
-app.get('/auth/google/callback', route(async (req, res) => {
+app.get('/auth/google/callback', openRoute(async (req, res) => {
   try {
     if (req.query.error) throw new Error(req.query.error);
     await google.handleCallback(req.query.code);
@@ -818,7 +940,9 @@ app.get('/auth/google/callback', route(async (req, res) => {
   }
 }));
 
-app.post('/api/google/disconnect', route(async (req, res) => {
+// integrations holds OAuth refresh tokens and is deliberately service-role-only,
+// so this cannot run under RLS.
+app.post('/api/google/disconnect', serviceRoute(async (req, res) => {
   await google.disconnect();
   res.json({ ok: true });
 }));
@@ -848,10 +972,14 @@ async function start() {
   await storage.ensureBucket();
   await google.load();
 
+  // Both sweeps cross org boundaries and have no signed-in user, so they run
+  // service-scoped. Under RLS they would see nothing and silently no-op.
+  const sweep = () => db.withService(() => runDueSchedules().then(runDueReminders));
+
   app.listen(PORT, () => {
     console.log(`Invoicing tool running at http://localhost:${PORT}`);
-    runDueSchedules().then(runDueReminders);
-    setInterval(() => runDueSchedules().then(runDueReminders), 60 * 60 * 1000); // hourly
+    sweep();
+    setInterval(sweep, 60 * 60 * 1000); // hourly
   });
 }
 

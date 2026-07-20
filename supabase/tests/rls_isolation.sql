@@ -149,12 +149,31 @@ select assert_eq(count(*), 0, 'orgless user sees no invoices')  from invoices;
 select assert_eq(count(*), 0, 'orgless user sees no balances')  from invoice_balances;
 reset role;
 
--- ── Archiving an org revokes access ─────────────────────────
-update organizations set archived_at = now() where id = 'org_a';
+-- ── Archiving ───────────────────────────────────────────────
+-- The owner must still be able to archive their own org: RLS scopes by
+-- ownership only, so the soft-deleted row does not fail its own policy
+-- (see 0003 — putting archived_at in the policy made archiving impossible).
 set role authenticated;
 select set_config('request.jwt.claims', '{"sub":"11111111-1111-1111-1111-111111111111"}', false);
-select assert_eq(count(*), 0, 'archived org revokes access')   from organizations;
-select assert_eq(count(*), 0, 'archived org hides customers')  from customers;
+do $$
+declare n int;
+begin
+  update organizations set archived_at = now() where id = 'org_a';
+  get diagnostics n = row_count;
+  if n <> 1 then raise exception 'FAIL: owner could not archive their own org (% rows)', n; end if;
+  raise notice 'ok: owner can archive their own org';
+end $$;
+
+-- Archiving still hides the org's data, because owns_org() checks archived_at.
+select assert_eq(count(*), 0, 'archived org hides customers') from customers;
+select assert_eq(count(*), 0, 'archived org hides invoices')  from invoices;
+select assert_eq(count(*), 0, 'archived org hides balances')  from invoice_balances;
+reset role;
+
+-- A stranger still cannot see the archived org.
+set role authenticated;
+select set_config('request.jwt.claims', '{"sub":"22222222-2222-2222-2222-222222222222"}', false);
+select assert_eq(count(*), 0, 'archived org invisible to others') from organizations where id = 'org_a';
 reset role;
 
 \echo ''
