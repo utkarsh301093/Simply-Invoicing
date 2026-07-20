@@ -353,3 +353,13 @@ textarea { resize: vertical; min-height: 70px; }
   background: #fdeaea; border: 1px solid #f5c2c2; color: #a12626;
   padding: 9px 11px; border-radius: 8px; font-size: 13px; margin-bottom: 4px;
 }
+
+/* ── Passkeys ──────────────────────────────────────────────── */
+.login-or { display: flex; align-items: center; gap: 10px; margin: 18px 0 4px; color: var(--muted); font-size: 12px; }
+.login-or::before, .login-or::after { content: ''; flex: 1; height: 1px; background: #e6e8ec; }
+.login-passkey { margin-top: 10px; background: #fff; border: 1px solid #d9dce1; color: #1f2430; }
+.login-passkey:hover:not(:disabled) { background: #f7f8fa; }
+.passkey-list { margin: 4px 0 14px; border: 1px solid #eceef1; border-radius: 10px; overflow: hidden; }
+.passkey-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; }
+.passkey-row + .passkey-row { border-top: 1px solid #eceef1; }
+.passkey-name { font-weight: 600; font-size: 13px; }

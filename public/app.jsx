@@ -39,6 +39,74 @@ async function refreshSession() {
   return refreshing;
 }
 
+// ── Passkeys ─────────────────────────────────────────────────
+// supabase-js is used for exactly one thing: the WebAuthn ceremony, which has to
+// run in the browser and whose HTTP API is beta. Everything else still goes
+// through this app's own API.
+//
+// persistSession/autoRefreshToken are off on purpose. This app already owns the
+// session (localStorage + /api/auth/refresh); letting the SDK keep its own copy
+// would create two sources of truth that drift apart on sign-out.
+let _sbPromise = null;
+
+function supabaseClient() {
+  if (!_sbPromise) {
+    _sbPromise = (async () => {
+      const cfg = await (await fetch('/api/config')).json();
+      if (!cfg.passkeys) return null;
+      if (!window.supabase || !window.supabase.createClient) return null;
+      return window.supabase.createClient(cfg.supabaseUrl, cfg.supabasePublishableKey, {
+        auth: {
+          experimental: { passkey: true },
+          persistSession: false,
+          autoRefreshToken: false,
+        },
+      });
+    })().catch(() => null);
+  }
+  return _sbPromise;
+}
+
+// Supabase session shape -> this app's shape.
+function sessionFromSupabase(s) {
+  if (!s || !s.access_token) return null;
+  return {
+    accessToken: s.access_token,
+    refreshToken: s.refresh_token,
+    expiresAt: s.expires_at,
+    user: s.user ? { id: s.user.id, email: s.user.email } : null,
+  };
+}
+
+// Passkey management needs the SDK to hold the current session. Ours is the
+// authority, so push it in rather than having the SDK fetch its own.
+async function supabaseWithSession() {
+  const sb = await supabaseClient();
+  if (!sb) throw new Error('Passkeys are not configured');
+  const s = session.get();
+  if (!s || !s.accessToken) throw new Error('Please sign in first');
+  await sb.auth.setSession({ access_token: s.accessToken, refresh_token: s.refreshToken });
+  return sb;
+}
+
+// WebAuthn failures are mostly user actions (cancelled the prompt) rather than
+// faults, so they get a plain message instead of a scary one.
+function passkeyErrorMessage(e) {
+  const msg = (e && e.message) || String(e);
+  if (/NotAllowedError|abort/i.test(msg)) return 'Passkey prompt was cancelled';
+  if (/not support/i.test(msg)) return 'This browser does not support passkeys';
+  if (/no credentials|not found/i.test(msg)) return 'No passkey found for this site on this device';
+  // "Failed to fetch" is what a browser reports for any network-level failure —
+  // service unreachable, CORS, DNS. Meaningless to a user on its own.
+  if (/failed to fetch|networkerror|load failed/i.test(msg)) {
+    return 'Could not reach the passkey service. Check your connection and try again.';
+  }
+  if (/SecurityError|relying party|rp id/i.test(msg)) {
+    return 'Passkeys are not configured for this domain.';
+  }
+  return msg;
+}
+
 // ── API helper ───────────────────────────────────────────────
 async function api(path, opts = {}, _retried) {
   const token = session.token();
@@ -118,6 +186,36 @@ function Login({ onSignedIn }) {
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
+  const [passkeyReady, setPasskeyReady] = useState(false);
+
+  // Only offer the passkey button if the project is configured for it AND the
+  // browser can actually do WebAuthn — a dead button is worse than none.
+  useEffect(() => {
+    let alive = true;
+    if (!window.PublicKeyCredential) return;
+    supabaseClient().then((sb) => { if (alive) setPasskeyReady(Boolean(sb)); });
+    return () => { alive = false; };
+  }, []);
+
+  const signInWithPasskey = async () => {
+    setBusy(true); setErr(null);
+    try {
+      const sb = await supabaseClient();
+      if (!sb) throw new Error('Passkeys are not configured');
+      // Discoverable credential: the authenticator picks the account, so no
+      // email is needed up front.
+      const { data, error } = await sb.auth.signInWithPasskey();
+      if (error) throw error;
+      const s = sessionFromSupabase(data && data.session);
+      if (!s) throw new Error('Passkey sign-in returned no session');
+      session.set(s);
+      onSignedIn(s);
+    } catch (e2) {
+      setErr(passkeyErrorMessage(e2));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const submit = async (e) => {
     e.preventDefault();
@@ -158,6 +256,16 @@ function Login({ onSignedIn }) {
         <button className="btn primary login-btn" type="submit" disabled={busy}>
           {busy ? <span className="spin"></span> : 'Sign in'}
         </button>
+
+        {passkeyReady && (
+          <>
+            <div className="login-or"><span>or</span></div>
+            <button className="btn login-btn login-passkey" type="button" disabled={busy}
+              onClick={signInWithPasskey}>
+              <span aria-hidden="true">🔑</span> Sign in with a passkey
+            </button>
+          </>
+        )}
       </form>
     </div>
   );
@@ -1018,6 +1126,106 @@ function RecurringModal({ schedule, customers, products, settings, onClose, onSa
 }
 
 // ── Settings ─────────────────────────────────────────────────
+// ── Passkeys (Settings) ──────────────────────────────────────
+// Enrolment has to happen while signed in: the ceremony binds the new credential
+// to the current user, so there is no way to add one from the login page.
+function PasskeysCard() {
+  const [supported, setSupported] = useState(null); // null = still checking
+  const [list, setList] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      const sb = await supabaseWithSession();
+      const { data, error } = await sb.auth.passkey.list();
+      if (error) throw error;
+      setList(Array.isArray(data) ? data : (data && data.passkeys) || []);
+    } catch (e) {
+      setList([]); // listing is best-effort; enrolment is still worth offering
+    }
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const ok = Boolean(window.PublicKeyCredential) && Boolean(await supabaseClient());
+      if (!alive) return;
+      setSupported(ok);
+      if (ok) refresh();
+    })();
+    return () => { alive = false; };
+  }, [refresh]);
+
+  const add = async () => {
+    setBusy(true);
+    try {
+      const sb = await supabaseWithSession();
+      const { error } = await sb.auth.registerPasskey();
+      if (error) throw error;
+      toast('Passkey added');
+      await refresh();
+    } catch (e) {
+      toast(passkeyErrorMessage(e), true);
+    } finally { setBusy(false); }
+  };
+
+  const remove = async (id) => {
+    if (!confirm('Remove this passkey? You will no longer be able to sign in with it.')) return;
+    try {
+      const sb = await supabaseWithSession();
+      const { error } = await sb.auth.passkey.delete(id);
+      if (error) throw error;
+      toast('Passkey removed');
+      await refresh();
+    } catch (e) { toast(passkeyErrorMessage(e), true); }
+  };
+
+  if (supported === null) return null;
+
+  return (
+    <div className="card card-pad" style={{ marginBottom: 18 }}>
+      <h2 className="section-title">Passkeys</h2>
+      {!supported ? (
+        <p className="muted small">
+          Passkeys are unavailable — either this browser does not support them, or the
+          server has no <code>SUPABASE_PUBLISHABLE_KEY</code> configured.
+        </p>
+      ) : (
+        <>
+          <p className="muted small" style={{ marginTop: 0 }}>
+            Sign in with Touch ID, Windows Hello or a security key instead of a password.
+            A passkey works only on the device you create it on — add one per device.
+          </p>
+
+          {list && list.length > 0 && (
+            <div className="passkey-list">
+              {list.map((p) => (
+                <div key={p.id} className="passkey-row">
+                  <div>
+                    <div className="passkey-name">{p.friendly_name || p.name || 'Passkey'}</div>
+                    <div className="muted small">
+                      Added {p.created_at ? new Date(p.created_at).toLocaleDateString() : 'recently'}
+                    </div>
+                  </div>
+                  <button className="btn danger sm" onClick={() => remove(p.id)}>Remove</button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {list && list.length === 0 && (
+            <p className="muted small">No passkeys yet.</p>
+          )}
+
+          <button className="btn primary" onClick={add} disabled={busy}>
+            {busy ? <span className="spin"></span> : '＋ Add a passkey'}
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
 function SettingsPage({ settings, gstatus, reload }) {
   const [f, setF] = useState({
     businessName: settings.businessName, address: linesToText(settings.addressLines), gstin: settings.gstin,
@@ -1120,6 +1328,8 @@ function SettingsPage({ settings, gstatus, reload }) {
             set('reminderOffsets', [...f.reminderOffsets, n].sort((a, b) => a - b));
           }} />
         </div>
+
+        <PasskeysCard />
 
         <div className="card card-pad">
           <h2 className="section-title">Email — Google / Gmail</h2>

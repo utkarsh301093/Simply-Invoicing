@@ -911,6 +911,24 @@ function sessionView(d) {
   };
 }
 
+// Public client config. Only values that are safe in client code: the project URL
+// and the PUBLISHABLE key, which grants nothing on its own — RLS denies `anon` on
+// every table. The secret key must never appear here.
+//
+// passkeys is false when the publishable key is unset, which is what the login
+// page keys off to decide whether to offer the passkey button at all.
+app.get('/api/config', openRoute(async (req, res) => {
+  const publishableKey = process.env.SUPABASE_PUBLISHABLE_KEY || '';
+  // Same precedence as server/auth.js and the login proxy: SUPABASE_AUTH_URL is
+  // unset in production and falls back to SUPABASE_URL.
+  const url = process.env.SUPABASE_AUTH_URL || process.env.SUPABASE_URL || '';
+  res.json({
+    supabaseUrl: url,
+    supabasePublishableKey: publishableKey,
+    passkeys: Boolean(publishableKey && url),
+  });
+}));
+
 app.post('/api/auth/login', openRoute(async (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
   const password = String(req.body.password || '');
