@@ -23,6 +23,15 @@ npm run test:update    # re-record the golden file after an INTENTIONAL change
 npm run test:db:down
 ```
 
+Two further suites, each on its own throwaway container (no Supabase project, no credentials):
+
+```bash
+npm run test:rls      # 43 policy-level tenant-isolation + invoice-limit checks
+npm run test:auth     # 13 HTTP-level auth + isolation + limit checks
+```
+
+They run separately from `npm test` on purpose: each truncates every table and binds its own ports, so sharing a database makes them fight.
+
 `test/api-characterization.test.js` drives a full business flow through the HTTP API and snapshots every response to `test/golden/api-flow.json`. It is a **behavioral contract, not a correctness spec** — it records what the app does so refactors can prove they changed nothing. A diff means either a regression or a deliberate change; decide which before re-recording.
 
 The suite **truncates every table**, so `test/harness.js` requires `TEST_DATABASE_URL` and refuses any URL containing `supabase.co`. Tests also run with `SUPABASE_URL` unset, which puts `server/storage.js` on its local-filesystem driver — no test ever touches a real bucket.
@@ -36,7 +45,8 @@ Volatile values (generated ids, timestamps, today's date, base64 data URLs) are 
 - `server/index.js` — all Express routes. Contains the storage↔API mapping layer: the DB is normalized but the REST API and frontend use a flatter legacy shape. All translation happens here via `invoiceView()`, `customerView()`, `settingsView()`, etc. Also hosts both hourly schedulers.
 - `server/db.js` — the data-access layer over `pg`. **Every function returns records in the same nested shape the old JSON store used** (`{ profile, branding, defaults, numbering }`, `{ snapshot, amounts, lineItems }`), which is what keeps the mapping layer in `index.js` as the single translation point. Owns the connection pool, transactions, and id generation.
 - `server/pgtypes.js` — Postgres type parsers. Must be required before any query. Each one is load-bearing; see the comments before changing them (notably: `date` stays a string so invoice dates can't shift a day, and `numeric` becomes a Number so money doesn't turn into string concatenation).
-- `server/storage.js` — Supabase Storage for invoice PDFs and org logos, with a local-filesystem driver used automatically when Supabase isn't configured. Deliberately not `@supabase/supabase-js`: that SDK bundles Realtime (needs a WebSocket polyfill on Node < 22), Auth and PostgREST, none of which this app uses.
+- `server/auth.js` — verifies Supabase access tokens against the project JWKS (ES256). Local verification, cached keys, fails closed.
+- `server/storage.js` — Supabase Storage for invoice PDFs and org logos, with a local-filesystem driver used automatically when Supabase isn't configured. Deliberately not `@supabase/supabase-js` **on the server**: that SDK bundles Realtime (needs a WebSocket polyfill on Node < 22), Auth and PostgREST, none of which the server uses. The browser does load it, for passkeys only — see below.
 - `server/pdf.js` — server-side vector PDF generation with `pdfkit` + `svg-to-pdfkit`. Colors/layout hardcoded to match `public/styles.css`.
 - `server/invoice.js` — `computeTotals()`, `amountToWords()`, `round2()`.
 - `server/google.js` — Gmail OAuth2 via `googleapis` + `nodemailer`. The connection is **cached in memory** (`load()` at boot) so `status()` can stay synchronous for routes and the reminder sweep.
@@ -67,15 +77,50 @@ These were previously JS-side checks that a crash or a race could bypass:
 - Item names are case-insensitively unique per org (the `/api/products` de-dupe), and archiving frees the name.
 - Only one *pending* reminder per (invoice, date); cancelled ones don't block a reschedule.
 
+## Authentication
+
+Every `/api/*` data route requires a Supabase access token. `server/auth.js` verifies it locally against the project's published JWKS (ES256) — no shared secret, no round-trip per request. It fails closed, and reports expiry distinctly so the frontend can refresh instead of forcing a re-login.
+
+Sign-in is **proxied** through `POST /api/auth/login` rather than done in the browser, so no Supabase key is needed in client code for passwords. The one exception is passkeys (below).
+
+Three route wrappers make each route's access level visible where it is defined:
+
+- **`route()`** — signed in, runs inside `db.withUser()`, RLS applies.
+- **`serviceRoute()`** — signed in but bypasses RLS. Only for what RLS cannot express: creating an org (the `owner_user_id` row RLS keys off does not exist yet) and Gmail tokens (`integrations` has no policy by design).
+- **`openRoute()`** — no auth. OAuth redirects, `/api/config`, login/refresh.
+
 ## Multi-org scoping
 
-Routes call `await requireOrg(res)`, which returns `db.activeOrg()` — the org in `app_state.current_org_id`, falling back to the oldest live org. Every query is scoped by `org_id`.
+Routes call `await requireOrg(res)`, which returns `db.activeOrg()` — the org in `app_state.current_org_id` **for the signed-in user** (`app_state` is keyed by `user_id`), falling back to the oldest live org. Every query is scoped by `org_id`.
 
 ## Row Level Security
 
-RLS is enabled on all 13 tables with **no policies**, so every role except `service_role` is denied. Note the server connects with the secret key, which **bypasses RLS entirely** — so RLS protects nothing at runtime today. The real control is that the key never leaves the server and the browser never talks to Supabase directly (it only calls this Express API; the publishable key is unused).
+RLS is real at runtime. `db.withUser()` opens **one transaction per request**, sets the verified JWT claims and switches to the `authenticated` role; `set local` scopes both to that transaction, so a pooled connection cannot leak one user's identity into the next request. The identity travels in `AsyncLocalStorage`, so `q()`/`one()`/`tx()` pick it up and the ~40 repository functions in `db.js` cannot accidentally opt out.
 
-RLS is there as defense-in-depth for a leaked publishable key, and as the multi-user on-ramp: `organizations.owner_user_id` and commented-out policies at the bottom of the migration mean enabling auth is a policy change, not a schema change. `integrations` holds Gmail refresh tokens and must stay `service_role`-only regardless.
+Policies key off `organizations.owner_user_id` via `owns_org()` (`SECURITY DEFINER`, or the organizations policy would recurse). `integrations` and `user_limits` have **no policy at all** — Gmail refresh tokens and a user's own quota must stay service-role-only.
+
+Two things that are easy to get wrong and are load-bearing:
+
+- **Do not add `force row level security`.** FORCE subjects the table *owner* to policies too, and the connecting role is the owner. The owner bypass **is** the `withService()` mechanism the hourly sweeps depend on; forcing it would blind them.
+- **Do not put `archived_at` in a policy predicate.** Soft-deleting a row then fails its own policy and the UPDATE is rejected — this is exactly what `0003` had to undo for org archiving. RLS answers "is this row yours"; lifecycle filtering belongs in the query.
+
+`tx()` nests on a SAVEPOINT inside a request transaction. That is not tidiness: routes answer 4xx without rethrowing, so the request still commits, and without the savepoint a rejected invoice create would keep its `next_number` increment and burn an invoice number.
+
+Verify with `npm run test:rls` (43 policy-level checks) and `npm run test:auth` (13 HTTP-level checks). Both use throwaway containers and need no Supabase project.
+
+## Monthly invoice limit
+
+A `BEFORE INSERT` trigger on `invoices` caps creation at `user_limits.monthly_invoice_limit` (default 30) per user per UTC calendar month. It is in the database because there are three creation paths (`POST /api/invoices`, `POST /api/recurring/:id/run`, the hourly sweep) and a JS check would have to be repeated at each.
+
+Archived invoices still count — archiving is a soft delete, so excluding them would let a user delete and recreate indefinitely. The trigger locks the `user_limits` row before counting, so concurrent requests cannot both slip under the cap. Refusal raises SQLSTATE `IL001`, mapped to **429**, not 500. Edit the limit in the Supabase table editor; it applies on the next insert.
+
+## Passkeys
+
+`supabase-js` is loaded in the browser for **this feature only** — a deliberate exception to "the frontend only calls this API". A WebAuthn ceremony must run in the browser, and Supabase's passkey HTTP API is beta and undocumented, so hand-rolling it against raw endpoints would break silently. The SDK is version-pinned for the same reason.
+
+It is created with `persistSession` and `autoRefreshToken` **off**: this app owns the session, and a second SDK-managed copy would drift on sign-out. `setSession()` pushes ours in when enrolment needs it.
+
+`GET /api/config` serves only the project URL and the publishable key. With no publishable key set, `passkeys` is false and both the login button and the settings card hide themselves. Passkeys are bound to `webauthn_rp_id`, so they only work on the configured origin — they cannot be tested against localhost or a headless browser.
 
 ## Hourly schedulers
 
