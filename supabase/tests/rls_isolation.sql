@@ -176,6 +176,84 @@ select set_config('request.jwt.claims', '{"sub":"22222222-2222-2222-2222-2222222
 select assert_eq(count(*), 0, 'archived org invisible to others') from organizations where id = 'org_a';
 reset role;
 
+
+-- ── Monthly invoice limit (0004) ────────────────────────────
+-- org_a is archived by the section above; use bob/org_b, which is live.
+-- Admin steps run as the table owner, standing in for the Supabase dashboard.
+delete from invoices where org_id = 'org_b';
+insert into user_limits (user_id, monthly_invoice_limit)
+  values ('22222222-2222-2222-2222-222222222222', 3)
+  on conflict (user_id) do update set monthly_invoice_limit = 3;
+reset role;
+
+set role authenticated;
+select set_config('request.jwt.claims', '{"sub":"22222222-2222-2222-2222-222222222222"}', false);
+
+-- Three succeed.
+do $$
+declare i int;
+begin
+  for i in 1..3 loop
+    insert into invoices (id, org_id, number, customer_id, total)
+    values ('inv_lim' || i, 'org_b', 'LIM-' || i, 'cust_b', 10);
+  end loop;
+  raise notice 'ok: invoices up to the limit are allowed';
+end $$;
+
+-- The fourth is refused with the dedicated SQLSTATE.
+do $$ begin
+  insert into invoices (id, org_id, number, customer_id, total)
+  values ('inv_lim4', 'org_b', 'LIM-4', 'cust_b', 10);
+  raise exception 'FAIL: limit was not enforced';
+exception when sqlstate 'IL001' then raise notice 'ok: limit enforced at the cap';
+end $$;
+
+select assert_eq(count(*), 3, 'exactly 3 invoices exist') from invoices where org_id = 'org_b';
+
+-- Archiving does not free quota: a soft delete must not be a way to farm it.
+update invoices set archived_at = now() where id = 'inv_lim1';
+do $$ begin
+  insert into invoices (id, org_id, number, customer_id, total)
+  values ('inv_lim5', 'org_b', 'LIM-5', 'cust_b', 10);
+  raise exception 'FAIL: archiving freed quota';
+exception when sqlstate 'IL001' then raise notice 'ok: archived invoices still count';
+end $$;
+
+-- A user must not be able to read or raise their own cap.
+do $$ begin
+  perform 1 from user_limits;
+  raise exception 'FAIL: user could read user_limits';
+exception when insufficient_privilege then raise notice 'ok: user_limits denied to authenticated';
+end $$;
+
+do $$ begin
+  update user_limits set monthly_invoice_limit = 9999
+    where user_id = '22222222-2222-2222-2222-222222222222';
+  raise exception 'FAIL: user raised their own limit';
+exception when insufficient_privilege then raise notice 'ok: user cannot raise own limit';
+end $$;
+
+-- Raising the cap in the dashboard takes effect immediately.
+reset role;
+update user_limits set monthly_invoice_limit = 5
+  where user_id = '22222222-2222-2222-2222-222222222222';
+reset role;
+
+set role authenticated;
+select set_config('request.jwt.claims', '{"sub":"22222222-2222-2222-2222-222222222222"}', false);
+insert into invoices (id, org_id, number, customer_id, total)
+  values ('inv_lim6', 'org_b', 'LIM-6', 'cust_b', 10);
+select assert_eq(count(*), 4, 'raising the cap allows more') from invoices where org_id = 'org_b';
+
+-- A user with no user_limits row gets the default of 30.
+reset role;
+insert into auth.users (id) values ('44444444-4444-4444-4444-444444444444') on conflict do nothing;
+insert into organizations (id, name, owner_user_id)
+  values ('org_d', 'Dana Co', '44444444-4444-4444-4444-444444444444');
+reset role;
+select assert_eq(public.monthly_invoice_limit_for('44444444-4444-4444-4444-444444444444')::bigint,
+                 30, 'default limit is 30 with no row');
+
 \echo ''
 \echo '===================================='
 \echo ' ALL RLS ISOLATION TESTS PASSED'

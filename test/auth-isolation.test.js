@@ -220,6 +220,55 @@ test('auth + tenant isolation', async (t) => {
     assert.ok(!after.text.includes(aliceInvoiceId), 'bob reached alice invoices after activate');
   });
 
+  await t.test('monthly invoice limit is enforced over HTTP', async () => {
+    // Bob owns one org and no invoices yet. Drop his cap to 2 the way the
+    // dashboard would, then spend it.
+    await pool.query(
+      `insert into user_limits (user_id, monthly_invoice_limit) values ($1, 2)
+       on conflict (user_id) do update set monthly_invoice_limit = 2`, [BOB]
+    );
+
+    const cust = await api('/api/customers', {
+      token: bobToken, method: 'POST', body: { name: 'Bob Customer' },
+    });
+    assert.equal(cust.status, 200);
+
+    const mk = () => api('/api/invoices', {
+      token: bobToken, method: 'POST',
+      body: { customerId: cust.body.id, invoiceDate: '2026-07-20', items: [{ description: 'W', qty: 1, rate: 10, taxPct: 0 }] },
+    });
+
+    assert.equal((await mk()).status, 200, 'first invoice within the cap');
+    assert.equal((await mk()).status, 200, 'second invoice within the cap');
+
+    const over = await mk();
+    assert.equal(over.status, 429, `third must be refused, got ${over.status}`);
+    assert.equal(over.body.limitReached, true);
+    assert.match(over.body.error, /Monthly invoice limit reached \(2 of 2 used\)/);
+
+    // A refused create must not burn an invoice number.
+    const { rows } = await pool.query(
+      `select next_number from organizations where owner_user_id = $1`, [BOB]
+    );
+    assert.equal(Number(rows[0].next_number), 3, 'rejected create consumed a number');
+
+    // Usage reporting matches what the cap judged.
+    const usage = await api('/api/usage', { token: bobToken });
+    assert.equal(usage.status, 200);
+    assert.equal(usage.body.invoicesThisMonth, 2);
+    assert.equal(usage.body.monthlyLimit, 2);
+    assert.equal(usage.body.remaining, 0);
+
+    // Raising the cap in the database immediately unblocks creation.
+    await pool.query(`update user_limits set monthly_invoice_limit = 3 where user_id = $1`, [BOB]);
+    assert.equal((await mk()).status, 200, 'raised cap should allow one more');
+
+    // Alice's quota is independent of Bob's.
+    const aliceUsage = await api('/api/usage', { token: aliceToken });
+    assert.equal(aliceUsage.body.monthlyLimit, 30, 'alice keeps the default');
+    assert.equal(aliceUsage.body.invoicesThisMonth, 1, 'alice unaffected by bob');
+  });
+
   await t.test('bob cannot pay or delete alice invoice', async () => {
     const pay = await api(`/api/invoices/${aliceInvoiceId}/pay`, {
       token: bobToken, method: 'POST', body: { amount: 1 },

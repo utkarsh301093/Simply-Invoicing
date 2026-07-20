@@ -136,8 +136,17 @@ async function requireOrg(res) {
 //
 // All three funnel rejections into a 500 rather than a hung request.
 // ─────────────────────────────────────────────────────────────
+// The monthly-invoice-limit trigger raises SQLSTATE IL001. It is a quota
+// refusal, not a server fault, so it must not surface as a 500.
+const LIMIT_ERRCODE = 'IL001';
+function isLimitError(e) { return e && e.code === LIMIT_ERRCODE; }
+
 function fail(req, res) {
   return (e) => {
+    if (isLimitError(e)) {
+      if (!res.headersSent) res.status(429).json({ error: e.message, limitReached: true });
+      return;
+    }
     console.error(`${req.method} ${req.path} failed:`, e.message);
     if (!res.headersSent) res.status(500).json({ error: e.message });
   };
@@ -430,6 +439,7 @@ app.post('/api/invoices', route(async (req, res) => {
     await saveInvoicePdf(org, inv);
     res.json(invoiceView(inv));
   } catch (e) {
+    if (isLimitError(e)) return res.status(429).json({ error: e.message, limitReached: true });
     res.status(400).json({ error: e.message });
   }
 }));
@@ -688,6 +698,7 @@ app.post('/api/recurring/:id/run', route(async (req, res) => {
     await saveInvoicePdf(org, inv);
     res.json(invoiceView(inv));
   } catch (e) {
+    if (isLimitError(e)) return res.status(429).json({ error: e.message, limitReached: true });
     res.status(400).json({ error: e.message });
   }
 }));
@@ -747,7 +758,17 @@ async function runDueSchedules() {
           const inv = await generateFromSchedule(org, schedule);
           await saveInvoicePdf(org, inv);
         } catch (e) {
-          console.error('Recurring generation failed for', schedule.id, e.message);
+          if (isLimitError(e)) {
+            // next_run_date is advanced in the same transaction, so it rolled
+            // back with the insert: this schedule retries next sweep and catches
+            // up once the month rolls over or the cap is raised. Record it so a
+            // missing recurring invoice has a visible reason.
+            console.warn('Recurring generation skipped for', schedule.id, '-', e.message);
+            await db.activity.log(org.id, 'recurring.limit_reached', 'recurring', schedule.id,
+              `Skipped recurring generation: ${e.message}`).catch(() => {});
+          } else {
+            console.error('Recurring generation failed for', schedule.id, e.message);
+          }
           break;
         }
         schedule = await db.recurring.byId(org.id, schedule.id);
@@ -916,6 +937,21 @@ app.post('/api/auth/refresh', openRoute(async (req, res) => {
 // Who am I — also the frontend's "is my stored token still good" probe.
 app.get('/api/auth/me', route(async (req, res) => {
   res.json({ id: req.claims.sub, email: req.claims.email || null });
+}));
+
+// Quota for the signed-in user. my_invoice_usage() takes no argument, so a user
+// can only ever ask about themselves.
+app.get('/api/usage', route(async (req, res) => {
+  const row = await db.one('select used, allowed from my_invoice_usage()');
+  const used = row ? Number(row.used) : 0;
+  const allowed = row ? Number(row.allowed) : 0;
+  const reset = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() + 1, 1));
+  res.json({
+    invoicesThisMonth: used,
+    monthlyLimit: allowed,
+    remaining: Math.max(0, allowed - used),
+    resetsOn: reset.toISOString().slice(0, 10),
+  });
 }));
 
 app.get('/api/google/status', (req, res) => res.json(google.status()));
