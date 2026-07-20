@@ -754,7 +754,7 @@
     "status": 200,
     "response": {
       "amountInWords": "United States Dollar Thirty-Five Thousand Four Hundred",
-      "amountPaid": 40400,
+      "amountPaid": 35400,
       "balanceDue": 0,
       "billTo": {
         "addressLines": [
@@ -791,7 +791,7 @@
       "notes": "Thanks for your business.",
       "number": "ACME-1",
       "payment": {
-        "amount": 35400,
+        "amount": 30400,
         "date": "2030-01-12",
         "mode": "UPI",
         "reference": "UTR-002"

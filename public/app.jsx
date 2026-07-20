@@ -500,7 +500,9 @@ function PayModal({ inv, settings, onClose, onDone }) {
   const [mode, setMode] = useState('Bank Transfer');
   const [date, setDate] = useState(today());
   const [reference, setReference] = useState('');
-  const [amount, setAmount] = useState(inv.total);
+  // Prefill what's outstanding, not the total: on a partially-paid invoice the
+  // total exceeds the balance and the server rejects it.
+  const [amount, setAmount] = useState(inv.balanceDue != null ? inv.balanceDue : inv.total);
   const [busy, setBusy] = useState(false);
   const save = async () => {
     setBusy(true);

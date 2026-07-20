@@ -410,8 +410,17 @@ app.post('/api/invoices/:id/pay', route(async (req, res) => {
   const inv = await db.invoices.byId(org.id, req.params.id);
   if (!inv) return res.status(404).json({ error: 'Invoice not found' });
 
+  // Default to what is still outstanding, not the full total — otherwise a second
+  // "mark paid" on a partially-paid invoice re-records the whole amount, inflating
+  // amountPaid and the ledger. balanceDue comes from the invoice_balances view.
+  const balanceDue = round2(inv.balance.balanceDue);
+  if (balanceDue <= 0) return res.status(400).json({ error: 'Invoice is already fully paid' });
+  const amount = req.body.amount != null ? round2(req.body.amount) : balanceDue;
+  if (!(amount > 0)) return res.status(400).json({ error: 'Payment amount must be greater than zero' });
+  if (amount > balanceDue) return res.status(400).json({ error: `Payment exceeds balance due (${inv.currency}${balanceDue})` });
+
   const payment = await db.payments.add(org.id, inv.id, {
-    amount: req.body.amount != null ? round2(req.body.amount) : inv.amounts.total,
+    amount,
     currency: inv.currency, mode: req.body.mode || 'Bank Transfer',
     date: req.body.date || now().slice(0, 10), reference: req.body.reference || '', note: '',
   });
