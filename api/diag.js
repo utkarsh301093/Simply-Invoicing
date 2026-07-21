@@ -3,7 +3,13 @@
 // the server graph throws on Vercel (and with what stack). Remove once the API is
 // confirmed healthy.
 module.exports = (req, res) => {
-  const out = { node: process.version, url: req.url, cwd: process.cwd(), region: process.env.VERCEL_REGION || null };
+  const out = {
+    node: process.version,
+    commit: (process.env.VERCEL_GIT_COMMIT_SHA || 'unknown').slice(0, 7),
+    url: req.url,
+    cwd: process.cwd(),
+    region: process.env.VERCEL_REGION || null,
+  };
   try {
     const app = require('../server/index.js');
     out.requiredServer = typeof app;
