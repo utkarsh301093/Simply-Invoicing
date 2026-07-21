@@ -39,6 +39,44 @@ async function refreshSession() {
   return refreshing;
 }
 
+// ── Email-link callback ──────────────────────────────────────
+// Supabase's magic-link and password-recovery emails redirect back here with the
+// tokens in the URL *hash* (the default implicit flow), e.g.
+//   #access_token=…&refresh_token=…&expires_at=…&type=recovery
+// or, when the link is stale, #error=…&error_code=otp_expired. Nothing else reads
+// that hash, so before this existed a clicked link just landed on the login page
+// and left the user signed out — which is exactly the "leads back to sign in"
+// symptom. We parse it once at boot, adopt the session, and scrub the hash so a
+// refresh can't replay it and the tokens don't linger in the address bar.
+function consumeAuthRedirect() {
+  const raw = (window.location.hash || '').replace(/^#/, '');
+  if (!raw) return {};
+  const p = new URLSearchParams(raw);
+  const errorCode = p.get('error_code') || p.get('error');
+  const accessToken = p.get('access_token');
+  if (!errorCode && !accessToken) return {};
+
+  // Scrub regardless of outcome — the hash has served its purpose either way.
+  try { window.history.replaceState(null, '', window.location.pathname + window.location.search); } catch {}
+
+  if (errorCode) {
+    const desc = p.get('error_description') || 'That link is invalid or has expired. Please request a new one.';
+    return { error: desc.replace(/\+/g, ' ') };
+  }
+
+  const type = p.get('type') || '';
+  session.set({
+    accessToken,
+    refreshToken: p.get('refresh_token') || null,
+    expiresAt: Number(p.get('expires_at')) || null,
+    user: null, // filled lazily by /api/auth/me if anything needs it
+  });
+  // Recovery must land on "set a new password", not straight into the app.
+  return { type, recovery: type === 'recovery' };
+}
+// Captured once at boot, below, before React mounts.
+let _bootAuth = {};
+
 // ── Passkeys ─────────────────────────────────────────────────
 // supabase-js is used for exactly one thing: the WebAuthn ceremony, which has to
 // run in the browser and whose HTTP API is beta. Everything else still goes
@@ -181,11 +219,14 @@ function datePresets() {
 }
 
 // ── Login ────────────────────────────────────────────────────
-function Login({ onSignedIn }) {
+function Login({ onSignedIn, initialError }) {
+  // mode: 'password' (default) | 'forgot' (reset email) | 'magic' (sign-in link)
+  const [mode, setMode] = useState('password');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState(null);
+  const [err, setErr] = useState(initialError || null);
+  const [sent, setSent] = useState(null); // the "check your email" message, once shown
   const [passkeyReady, setPasskeyReady] = useState(false);
 
   // Only offer the passkey button if the project is configured for it AND the
@@ -237,6 +278,78 @@ function Login({ onSignedIn }) {
     }
   };
 
+  // Reset link and magic link share a shape: POST an email, then show the same
+  // deliberately-vague confirmation whether or not the address has an account —
+  // the server never reveals which, so neither can we.
+  const sendEmailLink = async (e) => {
+    e.preventDefault();
+    setBusy(true); setErr(null);
+    const path = mode === 'forgot' ? '/api/auth/recover' : '/api/auth/magiclink';
+    try {
+      await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+      setSent(
+        mode === 'forgot'
+          ? 'If an account exists for that address, a password-reset link is on its way. Check your email.'
+          : 'If an account exists for that address, a sign-in link is on its way. Check your email.'
+      );
+    } catch (e2) {
+      // A network failure is the only thing that can land here; the request
+      // itself always 200s. Keep it plain.
+      setErr('Could not reach the server. Check your connection and try again.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const goMode = (m) => { setMode(m); setErr(null); setSent(null); };
+
+  // After an email link is sent, the form is replaced by a confirmation.
+  if (sent) {
+    return (
+      <div className="login-wrap">
+        <div className="login-card">
+          <h1 className="login-title">Simple Invoicing</h1>
+          <div className="login-sent">{sent}</div>
+          <button className="btn login-btn" type="button" onClick={() => goMode('password')}>
+            Back to sign in
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (mode === 'forgot' || mode === 'magic') {
+    const isForgot = mode === 'forgot';
+    return (
+      <div className="login-wrap">
+        <form className="login-card" onSubmit={sendEmailLink}>
+          <h1 className="login-title">Simple Invoicing</h1>
+          <p className="muted small login-sub">
+            {isForgot ? 'Reset your password' : 'Sign in with an email link'}
+          </p>
+
+          {err && <div className="login-error">{err}</div>}
+
+          <label className="lbl">Email</label>
+          <input className="inp" type="email" autoComplete="username" required autoFocus
+            value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" />
+
+          <button className="btn primary login-btn" type="submit" disabled={busy}>
+            {busy ? <span className="spin"></span> : (isForgot ? 'Send reset link' : 'Send sign-in link')}
+          </button>
+
+          <button className="btn login-btn login-link" type="button" onClick={() => goMode('password')}>
+            Back to sign in
+          </button>
+        </form>
+      </div>
+    );
+  }
+
   return (
     <div className="login-wrap">
       <form className="login-card" onSubmit={submit}>
@@ -257,6 +370,12 @@ function Login({ onSignedIn }) {
           {busy ? <span className="spin"></span> : 'Sign in'}
         </button>
 
+        <div className="login-alts">
+          <button type="button" className="login-textlink" onClick={() => goMode('forgot')}>Forgot password?</button>
+          <span className="login-dot">·</span>
+          <button type="button" className="login-textlink" onClick={() => goMode('magic')}>Email me a link</button>
+        </div>
+
         {passkeyReady && (
           <>
             <div className="login-or"><span>or</span></div>
@@ -271,9 +390,62 @@ function Login({ onSignedIn }) {
   );
 }
 
+// ── Set a new password (after a recovery link) ───────────────
+// Shown when a recovery link brought the user back: the hash carried a valid
+// (recovery-scoped) session, which api() sends as the bearer, so POST
+// /api/auth/password can update the password without any old-password check.
+function ResetPassword({ onDone }) {
+  const [pw, setPw] = useState('');
+  const [pw2, setPw2] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (pw.length < 8) return setErr('Password must be at least 8 characters');
+    if (pw !== pw2) return setErr('Passwords do not match');
+    setBusy(true); setErr(null);
+    try {
+      await api('/auth/password', { method: 'POST', body: { password: pw } });
+      toast('Password updated');
+      onDone();
+    } catch (e2) {
+      setErr(e2.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="login-wrap">
+      <form className="login-card" onSubmit={submit}>
+        <h1 className="login-title">Set a new password</h1>
+        <p className="muted small login-sub">Choose a password to finish signing in.</p>
+
+        {err && <div className="login-error">{err}</div>}
+
+        <label className="lbl">New password</label>
+        <input className="inp" type="password" autoComplete="new-password" required autoFocus
+          value={pw} onChange={(e) => setPw(e.target.value)} placeholder="At least 8 characters" />
+
+        <label className="lbl">Confirm password</label>
+        <input className="inp" type="password" autoComplete="new-password" required
+          value={pw2} onChange={(e) => setPw2(e.target.value)} placeholder="••••••••" />
+
+        <button className="btn primary login-btn" type="submit" disabled={busy}>
+          {busy ? <span className="spin"></span> : 'Save password'}
+        </button>
+      </form>
+    </div>
+  );
+}
+
 // ── Root: routes between login, the landing page, onboarding, and the app ───
 function Root() {
   const [signedIn, setSignedIn] = useState(() => Boolean(session.token()));
+  // A recovery link signs the user in (valid token) but must divert to the
+  // set-password screen before the app proper.
+  const [recovering, setRecovering] = useState(() => Boolean(_bootAuth.recovery));
   // api() clears the session on an unrecoverable 401; this bounces to the login
   // screen without every caller having to handle it.
   _onSessionChange = (s) => setSignedIn(Boolean(s && s.accessToken));
@@ -326,7 +498,12 @@ function Root() {
     setScreen('landing');
   };
 
-  if (!signedIn) return <>{<Login onSignedIn={() => setSignedIn(true)} />}{toastNode}</>;
+  // A recovery link takes precedence over everything: finish setting the password
+  // before the app loads. On success the session is already valid, so we just
+  // drop the diversion and fall through.
+  if (recovering) return <>{<ResetPassword onDone={() => setRecovering(false)} />}{toastNode}</>;
+
+  if (!signedIn) return <>{<Login onSignedIn={() => setSignedIn(true)} initialError={_bootAuth.error} />}{toastNode}</>;
 
   if (orgs === null) return <div className="loading-screen">Loading…</div>;
 
@@ -1610,5 +1787,9 @@ function Modal({ title, children, foot, onClose, wide }) {
     </div>
   );
 }
+
+// Read any email-link tokens out of the URL hash *before* React mounts, so the
+// session is in place (or the error captured) by the time Root reads it.
+_bootAuth = consumeAuthRedirect();
 
 ReactDOM.createRoot(document.getElementById('root')).render(<Root />);

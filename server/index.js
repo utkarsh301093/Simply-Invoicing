@@ -952,6 +952,67 @@ app.post('/api/auth/refresh', openRoute(async (req, res) => {
   res.json(sessionView(r.data));
 }));
 
+// Where Supabase's email links must land the user back. Prefer the configured
+// public URL; fall back to the request's own origin so preview deploys work even
+// when APP_BASE_URL is unset. Whatever this resolves to must be in the project's
+// Redirect URL allow-list, or Supabase silently refuses to redirect there.
+function appOrigin(req) {
+  const configured = (process.env.APP_BASE_URL || '').replace(/\/+$/, '');
+  if (configured) return configured;
+  const proto = (req.get('x-forwarded-proto') || req.protocol || 'https').split(',')[0];
+  return `${proto}://${req.get('host')}`;
+}
+
+// Password reset and magic-link both send an email. Neither may reveal whether
+// the address has an account, so both always answer 200 — a failure is logged
+// server-side, never surfaced. The token arrives in the browser as a URL hash
+// when the user clicks the link; the frontend's consumeAuthRedirect() reads it.
+app.post('/api/auth/recover', openRoute(async (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase();
+  if (email) {
+    const redirect = encodeURIComponent(appOrigin(req));
+    try { await supabaseAuth(`recover?redirect_to=${redirect}`, { email }); }
+    catch (e) { console.error('recover failed:', e.message); }
+  }
+  res.json({ ok: true });
+}));
+
+app.post('/api/auth/magiclink', openRoute(async (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase();
+  if (email) {
+    const redirect = encodeURIComponent(appOrigin(req));
+    // create_user:false — a magic link signs in an existing user only. Without
+    // it, /otp would silently self-register anyone who typed an address, turning
+    // the login page into open sign-up.
+    try { await supabaseAuth(`otp?redirect_to=${redirect}`, { email, create_user: false }); }
+    catch (e) { console.error('magiclink failed:', e.message); }
+  }
+  res.json({ ok: true });
+}));
+
+// Set a new password for the signed-in user. Reached from a recovery link (the
+// recovery token, a normal access token, authenticates this call) and could
+// later back a "change password" control in Settings. Forwards the caller's own
+// bearer to GoTrue's user endpoint — least privilege, not the admin API — so a
+// user can only ever change their own password.
+app.post('/api/auth/password', route(async (req, res) => {
+  const password = String(req.body.password || '');
+  if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
+  const base = (process.env.SUPABASE_AUTH_URL || process.env.SUPABASE_URL || '').replace(/\/+$/, '');
+  const key = process.env.SUPABASE_SECRET_KEY || '';
+  if (!base || !key) return res.status(500).json({ error: 'Supabase is not configured' });
+  const r = await fetch(`${base}/auth/v1/user`, {
+    method: 'PUT',
+    headers: { apikey: key, Authorization: `Bearer ${auth.bearer(req)}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password }),
+  });
+  if (!r.ok) {
+    const d = await r.json().catch(() => ({}));
+    return res.status(400).json({ error: d.error_description || d.msg || 'Could not update password' });
+  }
+  res.json({ ok: true });
+}));
+
 // Who am I — also the frontend's "is my stored token still good" probe.
 app.get('/api/auth/me', route(async (req, res) => {
   res.json({ id: req.claims.sub, email: req.claims.email || null });

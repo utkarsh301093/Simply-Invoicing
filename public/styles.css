@@ -353,6 +353,22 @@ textarea { resize: vertical; min-height: 70px; }
   background: #fdeaea; border: 1px solid #f5c2c2; color: #a12626;
   padding: 9px 11px; border-radius: 8px; font-size: 13px; margin-bottom: 4px;
 }
+.login-sent {
+  background: #eaf6ee; border: 1px solid #bfe3cb; color: #1f6b3b;
+  padding: 12px 13px; border-radius: 8px; font-size: 13px; line-height: 1.5;
+  margin: 6px 0 4px;
+}
+/* Row of "Forgot password? · Email me a link" under the sign-in button. */
+.login-alts { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 14px; }
+.login-dot { color: #c7ccd3; }
+.login-textlink {
+  background: none; border: 0; padding: 0; cursor: pointer;
+  color: var(--accent); font-size: 13px; font-weight: 600;
+}
+.login-textlink:hover { text-decoration: underline; }
+/* The plain "Back to sign in" button on the reset/magic screens. */
+.login-link { margin-top: 10px; background: none; border: 0; color: var(--muted); font-weight: 600; }
+.login-link:hover:not(:disabled) { color: #1f2430; }
 
 /* ── Passkeys ──────────────────────────────────────────────── */
 .login-or { display: flex; align-items: center; gap: 10px; margin: 18px 0 4px; color: var(--muted); font-size: 12px; }
