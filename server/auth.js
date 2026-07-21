@@ -7,7 +7,16 @@
 //
 // AUTH_JWKS_URL exists so the test suite can point at a throwaway key server and
 // exercise this exact code path rather than a weakened stand-in.
-const { createRemoteJWKSet, jwtVerify, decodeJwt } = require('jose');
+// jose is ESM-only. Under a plain Node require() this happens to resolve to jose's
+// CommonJS build, but Vercel's bundler resolves the package's ESM entry, which
+// require() cannot load (ERR_REQUIRE_ESM) — that threw at import time and took
+// down every serverless function. A dynamic import() loads it correctly on any
+// Node version or bundler, and the promise is cached so it happens once.
+let _josePromise = null;
+function jose() {
+  if (!_josePromise) _josePromise = import('jose');
+  return _josePromise;
+}
 
 let jwks = null;
 
@@ -18,8 +27,11 @@ function jwksUrl() {
   return `${base.replace(/\/+$/, '')}/auth/v1/.well-known/jwks.json`;
 }
 
-function keys() {
-  if (!jwks) jwks = createRemoteJWKSet(new URL(jwksUrl()));
+async function keys() {
+  if (!jwks) {
+    const { createRemoteJWKSet } = await jose();
+    jwks = createRemoteJWKSet(new URL(jwksUrl()));
+  }
   return jwks;
 }
 
@@ -35,7 +47,8 @@ function bearer(req) {
 // Returns the verified claims, or throws. The claims object is what lands in
 // request.jwt.claims, so auth.uid() reads `sub` straight out of it.
 async function verifyToken(token) {
-  const { payload } = await jwtVerify(token, keys(), {
+  const { jwtVerify } = await jose();
+  const { payload } = await jwtVerify(token, await keys(), {
     // Supabase issues `authenticated` for signed-in users; anon keys carry
     // role=anon and must not be accepted as a user.
     audience: 'authenticated',
@@ -65,4 +78,4 @@ function requireAuth() {
   };
 }
 
-module.exports = { requireAuth, verifyToken, resetKeys, bearer, decodeJwt };
+module.exports = { requireAuth, verifyToken, resetKeys, bearer };
