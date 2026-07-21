@@ -9,6 +9,17 @@ module.exports = (req, res) => {
     url: req.url,
     cwd: process.cwd(),
     region: process.env.VERCEL_REGION || null,
+    // Presence only — never the values. Pinpoints which env vars are still unset
+    // in Vercel without leaking any secret.
+    env: {
+      DATABASE_URL: Boolean(process.env.DATABASE_URL),
+      SUPABASE_URL: Boolean(process.env.SUPABASE_URL),
+      SUPABASE_SECRET_KEY: Boolean(process.env.SUPABASE_SECRET_KEY),
+      SUPABASE_PUBLISHABLE_KEY: Boolean(process.env.SUPABASE_PUBLISHABLE_KEY),
+      SUPABASE_STORAGE_BUCKET: Boolean(process.env.SUPABASE_STORAGE_BUCKET),
+      APP_BASE_URL: Boolean(process.env.APP_BASE_URL),
+      CRON_SECRET: Boolean(process.env.CRON_SECRET),
+    },
   };
   try {
     const app = require('../server/index.js');
