@@ -1098,4 +1098,19 @@ async function start() {
   });
 }
 
-start();
+// Run the long-lived server only when invoked directly (`node server/index.js`,
+// `npm start`, the tests). Under a serverless host (Vercel) the file is *required*
+// by api/index.js instead: there we export the Express app as the request handler
+// and never call start(), so there is no app.listen, no process.exit on a bad
+// DATABASE_URL, and — deliberately — no setInterval schedulers (serverless has no
+// long-lived process to run them; they need a cron trigger, see api/cron.js).
+if (require.main === module) {
+  start();
+}
+
+module.exports = app;
+
+// One catch-up pass of both hourly sweeps, service-scoped like the setInterval
+// path above. Exported so a cron trigger (api/cron.js) can drive them on Vercel,
+// where there is no long-lived process to host setInterval.
+module.exports.runSweeps = () => db.withService(() => runDueSchedules().then(runDueReminders));
