@@ -1066,7 +1066,15 @@ app.post('/api/google/disconnect', serviceRoute(async (req, res) => {
 // Static frontend
 // ─────────────────────────────────────────────────────────────
 app.use(express.static(path.join(__dirname, '..', 'public')));
-app.get('*', (req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'index.html')));
+app.get('*', (req, res) => {
+  // Locally this serves the SPA. On Vercel, static files come from the CDN and
+  // this path is only reached on a routing mismatch — where public/ isn't in the
+  // function bundle, so guard the sendFile: a missing file returns a JSON 404
+  // instead of an unhandled error that would crash the function.
+  res.sendFile(path.join(__dirname, '..', 'public', 'index.html'), (err) => {
+    if (err && !res.headersSent) res.status(404).json({ error: 'Not found' });
+  });
+});
 
 const PORT = process.env.PORT || 4000;
 
